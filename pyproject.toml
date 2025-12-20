@@ -16,17 +16,25 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    'flash-linear-attention',
-    'torch>=2.5',
-    'torchdata',
-    'transformers>=4.45.0',
-    'triton>=3.0',
-    'datasets>=3.3.0',
-    'einops',
-    'ninja',
-    'wandb',
-    'tiktoken',
-    'tensorboard',
+    "flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention",
+    "torch>=2.6.0,<2.7.0",
+    "torchvision>=0.21.0,<0.22.0",
+    "torchdata",
+    "transformers>=4.45.0",
+    "triton>=3.0",
+    "datasets>=3.3.0",
+    "einops",
+    "ninja",
+    "wandb",
+    "tiktoken",
+    "tensorboard",
+    "omegaconf",
+    "Pillow",
+    "imageio",
+    "numpy",
+    "pyarrow>=20.0.0",
+    "safetensors>=0.5.3",
+    "torchtitan @ git+https://github.com/pytorch/torchtitan.git@0b44d4c",
 ]
 
 [project.optional-dependencies]
