@@ -77,9 +77,11 @@ cp -r 3rdparty/flash-linear-attention/fla $path
 cp -r 3rdparty/torchtitan/torchtitan $path
 
 # for offline systems
-# export TRANSFORMERS_OFFLINE=1
-# export HF_DATASETS_OFFLINE=1
-# export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_CACHE="/home/junchen/links/scratch/datasets/fineweb-edu/sample-100BT"
+export TOKENIZERS_PARALLELISM=false
 if [ "$date" == "" ]; then
   date=$(date +%Y%m%d%H%M)
 fi
@@ -98,7 +100,7 @@ if [[ -z "${WANDB_RUN_ID}" ]]; then
 fi
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
-torchrun --nnodes=${NNODE} \
+uv run torchrun --nnodes=${NNODE} \
   --nproc_per_node=${NGPU} \
   --rdzv_backend c10d \
   --rdzv_endpoint "${MASTER_ADDR}:${MASTER_PORT}" \
@@ -112,7 +114,7 @@ torchrun --nnodes=${NNODE} \
 echo "TRAINING DONE!"
 echo "Converting the DCP checkpoints to HF format..."
 
-python -m flame.utils.convert_dcp_to_hf \
+uv run python -m flame.utils.convert_dcp_to_hf \
   --path $path \
   --step $steps \
   --config $config \
