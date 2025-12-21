@@ -80,7 +80,18 @@ cp -r 3rdparty/torchtitan/torchtitan $path
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_OFFLINE=1
-export HF_DATASETS_CACHE="/home/junchen/links/scratch/datasets/fineweb-edu/sample-100BT"
+export UV_PREVIEW_FEATURES=extra-build-dependencies
+
+# JC: the compute nodes only have read access to the scratch directory
+export HF_DATASETS_CACHE="$SCRATCH/datasets/fineweb-edu/sample-100BT"
+export UV_CACHE_DIR="$SCRATCH/.cache/uv"
+export TRITON_CACHE_DIR="$SCRATCH/.triton/cache"
+
+# JC: the compute nodes don't have internet access
+export WANDB_DIR="$SCRATCH/.cache/wandb"
+export WANDB_CACHE_DIR="$SCRATCH/.cache/wandb"
+export WANDB_MODE=offline
+
 export TOKENIZERS_PARALLELISM=false
 if [ "$date" == "" ]; then
   date=$(date +%Y%m%d%H%M)
