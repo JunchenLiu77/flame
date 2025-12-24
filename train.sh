@@ -12,11 +12,17 @@ NNODE=${NNODE:-"1"}
 NGPU=${NGPU:-"8"}
 LOG_RANK=${LOG_RANK:-0}
 
+# For SLURM: use the first node as master
 if [[ -z "${MASTER_ADDR}" ]]; then
-  export MASTER_ADDR="localhost"
+  if [[ -n "${SLURM_NODELIST}" ]]; then
+    export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+  else
+    export MASTER_ADDR="localhost"
+  fi
 fi
 if [[ -z "${MASTER_PORT}" ]]; then
-  export MASTER_PORT="0"
+  # Use a random port between 29500-29999 to avoid conflicts
+  export MASTER_PORT=$((29500 + RANDOM % 500))
 fi
 
 : '
@@ -76,21 +82,21 @@ cp -r flame   $path
 cp -r 3rdparty/flash-linear-attention/fla $path
 cp -r 3rdparty/torchtitan/torchtitan $path
 
-# for offline systems
-export TRANSFORMERS_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
-export HF_HUB_OFFLINE=1
-export UV_PREVIEW_FEATURES=extra-build-dependencies
+# for offline systems (only set if not already defined)
+export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+export UV_PREVIEW_FEATURES=${UV_PREVIEW_FEATURES:-extra-build-dependencies}
 
 # JC: the compute nodes only have read access to the scratch directory
-export HF_DATASETS_CACHE="$SCRATCH/datasets/fineweb-edu/sample-100BT"
-export UV_CACHE_DIR="$SCRATCH/.cache/uv"
-export TRITON_CACHE_DIR="$SCRATCH/.triton/cache"
+export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-"$SCRATCH/datasets/fineweb-edu/sample-100BT"}
+export UV_CACHE_DIR=${UV_CACHE_DIR:-"$SCRATCH/.cache/uv"}
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-"$SCRATCH/.triton/cache"}
 
 # JC: the compute nodes don't have internet access
-export WANDB_DIR="$SCRATCH/.cache/wandb"
-export WANDB_CACHE_DIR="$SCRATCH/.cache/wandb"
-export WANDB_MODE=offline
+export WANDB_DIR=${WANDB_DIR:-"$SCRATCH/.cache/wandb"}
+export WANDB_CACHE_DIR=${WANDB_CACHE_DIR:-"$SCRATCH/.cache/wandb"}
+export WANDB_MODE=${WANDB_MODE:-offline}
 
 export TOKENIZERS_PARALLELISM=false
 if [ "$date" == "" ]; then

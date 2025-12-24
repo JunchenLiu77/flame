@@ -80,6 +80,7 @@ def block_causal_lact_swiglu(
     chunk_size: int=2048,  # test-time training chunk size
     use_muon: bool = False,
     momentum: torch.Tensor = None, # [b, s, 1]
+    loss_type: str = "dot_product",
 ):
     """
     Block causal LaCT with SwiGLU fast weight function.
@@ -147,9 +148,16 @@ def block_causal_lact_swiglu(
         hidden_before_mul = torch.bmm(w2, ki.transpose(1, 2))
 
         hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
-        
+        # [b, dv, dh] @ [b, dh, l] -> [b, dv, l]
+        vp = torch.bmm(w1, hidden)
+
+        if loss_type == "dot_product":
+            dvp = -vi
+        elif loss_type == "vp**2":
+            dvp = 2*vp
+
         # [b, dh, dv] @ [b, dv, l] -> [b, dh, l]
-        dhidden = torch.bmm(w1.transpose(1, 2), vi)
+        dhidden = torch.bmm(w1.transpose(1, 2), dvp)
 
         dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False)
 
@@ -162,7 +170,7 @@ def block_causal_lact_swiglu(
         # [b, dv, l] @ [b, l, dh] -> [b, dv, dh]
         # it's better to cast the mat to bf16 before bmm.
         dw1 = torch.bmm(
-            vi, (hidden.transpose(1, 2) * lr1i).type_as(vi)
+            dvp, (hidden.transpose(1, 2) * lr1i).type_as(dvp)
         )  # [b, d, d]
         # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
         dw0 = torch.bmm(dgate_before_act, (ki * lr0i).type_as(dgate_before_act))
@@ -192,9 +200,13 @@ def block_causal_lact_swiglu(
             #     dw0 = (dw0 * muon_w0_lr).type_as(w0)
             #     dw2 = (dw2 * muon_w2_lr).type_as(w2)
 
-        w1 = w1 + dw1
-        w0 = w0 + dw0
-        w2 = w2 + dw2
+        # w1 = w1 + dw1
+        # w0 = w0 + dw0
+        # w2 = w2 + dw2
+        # print(f"using gradient ascent")
+        w1 = w1 - dw1
+        w0 = w0 - dw0
+        w2 = w2 - dw2
     
         # Do channel-wise l2 norm.  conceptually like post-norm.
         w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
@@ -231,6 +243,7 @@ def prenorm_block_causal_lact_swiglu(
     use_muon: bool = False,
     momentum: torch.Tensor = None, # [b, s, 1]
 ):
+    raise NotImplementedError("We only do exps on the non-prenorm version.")
     """
     Block causal LaCT with SwiGLU fast weight function.
         Apply then Update => Shifted Block Causal LaCT

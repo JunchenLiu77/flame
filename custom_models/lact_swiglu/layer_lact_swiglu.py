@@ -209,7 +209,7 @@ class LaCTSWIGLULayer(nn.Module):
 
         self.ttt_loss_type = ttt_loss_type
         
-        assert self.ttt_loss_type in ["dot_product"], f"Loss type {self.ttt_loss_type} not supported"
+        assert self.ttt_loss_type in ["dot_product", "vp**2"], f"Loss type {self.ttt_loss_type} not supported"
 
         
     def _rescale_qk(self, q, k):
@@ -399,7 +399,8 @@ class LaCTSWIGLULayer(nn.Module):
                 fw_lr1, fw_lr2, fw_lr3,
                 chunk_size=self.lact_chunk_size,
                 use_muon=self.use_muon,
-                momentum=momentum)
+                momentum=momentum,
+                loss_type=self.ttt_loss_type)
         
         # per-head output norm for ttt layer.
         ttt_x_normed = self.ttt_norm(fw_x)
