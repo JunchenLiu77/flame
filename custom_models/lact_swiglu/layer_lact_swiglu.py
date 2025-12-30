@@ -39,6 +39,7 @@ def inv_softplus(x):
         y = x + math.log(-math.expm1(-x))
     return y
 
+VISUALIZE = False
 
 class LowRankFastWeight(nn.Module):
     """
@@ -208,6 +209,9 @@ class LaCTSWIGLULayer(nn.Module):
             )
 
         self.ttt_loss_type = ttt_loss_type
+        if layer_idx is not None and layer_idx >= 0 and VISUALIZE:
+            import os
+            os.makedirs(f'exp/vis/{self.ttt_loss_type}/{layer_idx}', exist_ok=True)
         
     def _rescale_qk(self, q, k):
         """
@@ -323,6 +327,18 @@ class LaCTSWIGLULayer(nn.Module):
             )
         o = o.reshape(batch_size, q_len, -1)
 
+        if self.layer_idx is not None and self.layer_idx >= 0 and VISUALIZE:
+            # reshape q, k, v to [b, s, nh*d] for consistent printing
+            q_reshaped = q.reshape(batch_size, q_len, -1)  # [b, s, nh, d] -> [b, s, nh*d]
+            k_reshaped = k.reshape(batch_size, k.shape[1], -1)  # [b, s, nh, d] -> [b, s, nh*d]
+            v_reshaped = v.reshape(batch_size, v.shape[1], -1)  # [b, s, nh, d] -> [b, s, nh*d]
+            print(f"[{self.layer_idx}] q: {q_reshaped.shape}, k: {k_reshaped.shape}, v: {v_reshaped.shape}, o: {o.shape}")
+            # save q, k, v, o to files
+            torch.save(q_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/q.pt')
+            torch.save(k_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/k.pt')
+            torch.save(v_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/v.pt')
+            torch.save(o, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/o.pt')
+
         ##### TTT starts here. 
         # Split heads then merge it to batch dimension
         fast_q = rearrange(fast_q, 'b s (n_h d) -> (b n_h) s d', n_h=self.num_fw_heads)
@@ -399,6 +415,21 @@ class LaCTSWIGLULayer(nn.Module):
                 momentum=momentum,
                 loss_type=self.ttt_loss_type)
         
+        if self.layer_idx is not None and self.layer_idx >= 0 and VISUALIZE:
+            # reshape fast_q, fast_k, fast_v, fw_x from [b*nh, s, d] to [b, s, nh*d]
+            fast_q_reshaped = rearrange(fast_q, '(b n_h) s d -> b s (n_h d)', n_h=self.num_fw_heads)
+            fast_k_reshaped = rearrange(fast_k, '(b n_h) s d -> b s (n_h d)', n_h=self.num_fw_heads)
+            fast_v_reshaped = rearrange(fast_v, '(b n_h) s d -> b s (n_h d)', n_h=self.num_fw_heads)
+            fast_qk_reshaped = rearrange(0.5*(fast_q + fast_k), '(b n_h) s d -> b s (n_h d)', n_h=self.num_fw_heads)
+            fw_x_reshaped = rearrange(fw_x, '(b n_h) s d -> b s (n_h d)', n_h=self.num_fw_heads)
+            print(f"[{self.layer_idx}] fast_q: {fast_q_reshaped.shape}, fast_k: {fast_k_reshaped.shape}, fast_v: {fast_v_reshaped.shape}, fast_qk: {fast_qk_reshaped.shape}, fw_x: {fw_x_reshaped.shape}")
+            # save ttt_x statistics in exp/vis dir
+            torch.save(fast_q_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/fast_q.pt')
+            torch.save(fast_k_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/fast_k.pt')
+            torch.save(fast_v_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/fast_v.pt')
+            torch.save(fast_qk_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/fast_qk.pt')
+            torch.save(fw_x_reshaped, f'exp/vis/{self.ttt_loss_type}/{self.layer_idx}/fw_x.pt')
+
         # per-head output norm for ttt layer.
         ttt_x_normed = self.ttt_norm(fw_x)
         if self.learnable_ttt_scale: 

@@ -286,6 +286,7 @@ class LaCTModel(LaCTPreTrainedModel):
             if output_attentions:
                 all_attns += (layer_outputs[1],)
 
+        # exit()
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
