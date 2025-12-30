@@ -209,9 +209,6 @@ class LaCTSWIGLULayer(nn.Module):
 
         self.ttt_loss_type = ttt_loss_type
         
-        assert self.ttt_loss_type in ["dot_product", "vp**2"], f"Loss type {self.ttt_loss_type} not supported"
-
-        
     def _rescale_qk(self, q, k):
         """
         Args:

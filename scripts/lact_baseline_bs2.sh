@@ -21,7 +21,7 @@ module load cuda/12.6
 module load python/3.11.5
 
 # Environment variables
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_NUM_THREADS=24
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
