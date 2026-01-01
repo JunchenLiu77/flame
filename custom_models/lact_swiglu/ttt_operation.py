@@ -136,7 +136,7 @@ def block_causal_lact_swiglu(
         lr2i = lr2[:, s_index:e_index, :]  # [b, l, d/1] fp32
         lr0i = lr0[:, s_index:e_index, :]  # [b, l, d/1] fp32
 
-        if loss_type == "design1":
+        if loss_type in ["design1", "design2"]:
             # apply: o = MLP(0.5 * q + 0.5 * k)
             mlp_input = 0.5 * qi + 0.5 * ki.transpose(1, 2)
             # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
@@ -144,13 +144,15 @@ def block_causal_lact_swiglu(
             gate = F.silu(torch.bmm(w0, mlp_input), inplace=True)
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
             output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
-        else:
+        elif loss_type in ["dot_product", "vp**2"]:
             # use previous w0 and w1 to get the final output
             # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
             h = torch.bmm(w2, qi)
             gate = F.silu(torch.bmm(w0, qi), inplace=True)
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
             output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
+        else:
+            raise ValueError(f"Invalid loss type: {loss_type}")
 
         if loss_type == "design1":
             # update: 0.5 * MLP(q) + 0.5 * MLP(k) -> v, dot product loss
@@ -189,6 +191,36 @@ def block_causal_lact_swiglu(
             # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
             dw0 = 0.5 * torch.bmm(k_dgate_before_act, (ki * lr0i).type_as(k_dgate_before_act)) + 0.5 * torch.bmm(q_dgate_before_act, (qi.transpose(1, 2) * lr0i).type_as(q_dgate_before_act))
             dw2 = 0.5 * torch.bmm(k_dhidden_before_mul, (ki * lr2i).type_as(k_dhidden_before_mul)) + 0.5 * torch.bmm(q_dhidden_before_mul, (qi.transpose(1, 2) * lr2i).type_as(q_dhidden_before_mul))
+        elif loss_type == "design2":
+            # update: MLP(0.5 * q + 0.5 * k) -> v, dot product loss
+            mlp_input = 0.5 * qi.transpose(1, 2) + 0.5 * ki
+            # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
+            gate_before_act = torch.bmm(w0, mlp_input.transpose(1, 2))
+            hidden_before_mul = torch.bmm(w2, mlp_input.transpose(1, 2))
+            hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
+            # [b, dv, dh] @ [b, dh, l] -> [b, dv, l]
+            vpi = torch.bmm(w1, hidden)
+
+            # update: MLP(k) -> v, dot product loss
+            dvpi = -vi
+
+            # [b, dh, dv] @ [b, dv, l] -> [b, dh, l]
+            dhidden = torch.bmm(w1.transpose(1, 2), dvpi)
+            dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False)
+            dgate = dhidden * hidden_before_mul
+            dgate_before_act = silu_backprop(dgate, gate_before_act)
+
+            # [b, d_2, l] @ [b, l, d_1] -> [b, d_2, d_1]
+            # in bmm two mat is fp32, but the result is bf16.
+            # it's better to cast the mat to bf16 before bmm.
+            # [b, dv, l] @ [b, l, dh] -> [b, dv, dh]
+            # it's better to cast the mat to bf16 before bmm.
+            dw1 = torch.bmm(
+                dvpi, (hidden.transpose(1, 2) * lr1i).type_as(dvpi)
+            )  # [b, d, d]
+            # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
+            dw0 = torch.bmm(dgate_before_act, (mlp_input * lr0i).type_as(dgate_before_act))
+            dw2 = torch.bmm(dhidden_before_mul, (mlp_input * lr2i).type_as(dhidden_before_mul))
         else:
             # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
             gate_before_act = torch.bmm(w0, ki.transpose(1, 2))
@@ -197,6 +229,7 @@ def block_causal_lact_swiglu(
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l]
             vpi = torch.bmm(w1, hidden)
 
+            # update: MLP(k) -> v, loss type can be arbitrary.
             if loss_type == "dot_product":
                 dvpi = -vi
             elif loss_type == "vp**2":
