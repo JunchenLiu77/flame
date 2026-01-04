@@ -151,6 +151,13 @@ def block_causal_lact_swiglu(
             gate = F.silu(torch.bmm(w0, qi), inplace=True)
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
             output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
+        elif loss_type == "no_query_dot_product":
+            # use previous w0 and w1 to get the final output
+            # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
+            h = torch.bmm(w2, ki.transpose(1, 2))
+            gate = F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=True)
+            # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
+            output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
         else:
             raise ValueError(f"Invalid loss type: {loss_type}")
 
@@ -230,7 +237,7 @@ def block_causal_lact_swiglu(
             vpi = torch.bmm(w1, hidden)
 
             # update: MLP(k) -> v, loss type can be arbitrary.
-            if loss_type == "dot_product":
+            if loss_type in ["dot_product", "no_query_dot_product"]:
                 dvpi = -vi
             elif loss_type == "vp**2":
                 dvpi = 2*vpi
