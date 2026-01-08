@@ -46,6 +46,3 @@ __pycache__
 
 # macOS
 .DS_Store
-
-# uv
-uv.lock
