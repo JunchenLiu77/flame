@@ -182,13 +182,14 @@ class LaCTSWIGLULayer(nn.Module):
         )  # [num_fw_heads, d_out, d_h]
         
         #### Per-Token LR parameterization. 
-        self.lr_dim = int(lr_dim * 3 * self.num_fw_heads)
-        self.lr_proj = nn.Linear(self.hidden_size, self.lr_dim)
-        base_lr = 0.001
-        # Lr parameterization and initialization
-        if lr_parameterization.lower() == "mamba":
-            self.base_lr_inv = inv_softplus(base_lr)
-        self.lr_parameterization = lr_parameterization
+        if ttt_loss_type not in ["simplify7"]:
+            self.lr_dim = int(lr_dim * 3 * self.num_fw_heads)
+            self.lr_proj = nn.Linear(self.hidden_size, self.lr_dim)
+            base_lr = 0.001
+            # Lr parameterization and initialization
+            if lr_parameterization.lower() == "mamba":
+                self.base_lr_inv = inv_softplus(base_lr)
+            self.lr_parameterization = lr_parameterization
         
         #### per-channel scaling and offset for Q, and K. 
         self.qk_scale = nn.Parameter(torch.ones(hidden_size, 2))
@@ -203,12 +204,14 @@ class LaCTSWIGLULayer(nn.Module):
         
         self.use_momentum = use_momentum
         if self.use_momentum:
-            self.momentum_proj = nn.Sequential(
-                nn.Linear(hidden_size, self.num_fw_heads),
-                nn.Sigmoid(),
-            )
+            if ttt_loss_type != "simplify8":
+                self.momentum_proj = nn.Sequential(
+                    nn.Linear(hidden_size, self.num_fw_heads),
+                    nn.Sigmoid(),
+                )
 
         self.ttt_loss_type = ttt_loss_type
+        print(f"TTT loss type: {self.ttt_loss_type}")
         if layer_idx is not None and layer_idx >= 0 and VISUALIZE:
             import os
             os.makedirs(f'exp/vis/{self.ttt_loss_type}/{layer_idx}', exist_ok=True)
@@ -382,17 +385,23 @@ class LaCTSWIGLULayer(nn.Module):
         
         fw_w1 = self.w1.repeat(batch_size, 1, 1) # [nh, d_out, d_h] -> [b*nh, d_out, d_h]
 
-        lr = self.lr_proj(hidden_states) # [b, s, num_heads * lr_dim_per_head]
-        if self.lr_parameterization == "mamba":
-            lr = torch.nn.functional.softplus(lr.float() + self.base_lr_inv)
+        if self.ttt_loss_type not in ["simplify7"]:
+            lr = self.lr_proj(hidden_states) # [b, s, num_heads * lr_dim_per_head]
+            if self.lr_parameterization == "mamba":
+                lr = torch.nn.functional.softplus(lr.float() + self.base_lr_inv)
+            else:
+                raise NotImplementedError(f"LR parameterization {self.lr_parameterization} not implemented")
+            fw_lr = rearrange(lr, 'b s (n_h lr_dim) -> (b n_h) s lr_dim', n_h=self.num_fw_heads)
+            fw_lr1, fw_lr2, fw_lr3 = fw_lr.chunk(3, dim=-1)
         else:
-            raise NotImplementedError(f"LR parameterization {self.lr_parameterization} not implemented")
-        fw_lr = rearrange(lr, 'b s (n_h lr_dim) -> (b n_h) s lr_dim', n_h=self.num_fw_heads)
-        fw_lr1, fw_lr2, fw_lr3 = fw_lr.chunk(3, dim=-1)
+            fw_lr1, fw_lr2, fw_lr3 = None, None, None
 
         if self.use_momentum:
-            momentum = self.momentum_proj(hidden_states) # [b, s, nh]
-            momentum = rearrange(momentum, 'b s (n_h d) -> (b n_h) s d', n_h=self.num_fw_heads)
+            if self.ttt_loss_type == "simplify8":
+                momentum = 1
+            else:
+                momentum = self.momentum_proj(hidden_states) # [b, s, nh]
+                momentum = rearrange(momentum, 'b s (n_h d) -> (b n_h) s d', n_h=self.num_fw_heads)
         else:
             momentum = None
         

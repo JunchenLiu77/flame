@@ -15,6 +15,20 @@ def silu_backprop(dy: torch.Tensor, x: torch.Tensor):
     dx = dy * sigma * (1 + x * (1 - sigma))
     return dx
 
+@torch.compile
+def silu_backprop_(x: torch.Tensor):
+    """
+    Similar to silu_backprop, but don't take the upstream gradient
+    Args:
+        x: [b, d, l], input of the silu activation
+    outs:
+        dx: [b, d, l], gradient of the outer loss wrt the x
+        dx = sigma * (1 + x * (1 - sigma))
+    """
+    sigma = torch.sigmoid(x)
+    dx = sigma * (1 + x * (1 - sigma))
+    return dx
+
 
 @torch.compile()
 def l2_norm(x: torch.Tensor):
@@ -132,9 +146,12 @@ def block_causal_lact_swiglu(
         # [b, dh, l]
         qi = q[:, :, s_index:e_index]
         # [b, l, d/1] fp32
-        lr1i = lr1[:, s_index:e_index, :]  # [b, l, d/1] fp32
-        lr2i = lr2[:, s_index:e_index, :]  # [b, l, d/1] fp32
-        lr0i = lr0[:, s_index:e_index, :]  # [b, l, d/1] fp32
+        if lr1 is not None:
+            lr1i = lr1[:, s_index:e_index, :]  # [b, l, d/1] fp32
+        if lr2 is not None:
+            lr2i = lr2[:, s_index:e_index, :]  # [b, l, d/1] fp32
+        if lr0 is not None:
+            lr0i = lr0[:, s_index:e_index, :]  # [b, l, d/1] fp32
 
         if loss_type in ["design1", "design2"]:
             # apply: o = MLP(0.5 * q + 0.5 * k)
@@ -144,14 +161,7 @@ def block_causal_lact_swiglu(
             gate = F.silu(torch.bmm(w0, mlp_input), inplace=True)
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
             output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
-        elif loss_type in ["dot_product", "vp**2"]:
-            # use previous w0 and w1 to get the final output
-            # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
-            h = torch.bmm(w2, qi)
-            gate = F.silu(torch.bmm(w0, qi), inplace=True)
-            # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
-            output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
-        elif loss_type == "no_query_dot_product":
+        elif loss_type in ["no_query_dot_product", "no_query_dot_product_fix"]:
             # use previous w0 and w1 to get the final output
             # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
             h = torch.bmm(w2, ki.transpose(1, 2))
@@ -159,7 +169,13 @@ def block_causal_lact_swiglu(
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
             output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
         else:
-            raise ValueError(f"Invalid loss type: {loss_type}")
+            # default case, follow the original design
+            # use previous w0 and w1 to get the final output
+            # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
+            h = torch.bmm(w2, qi)
+            gate = F.silu(torch.bmm(w0, qi), inplace=True)
+            # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
+            output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
 
         if loss_type == "design1":
             # update: 0.5 * MLP(q) + 0.5 * MLP(k) -> v, dot product loss
@@ -228,6 +244,67 @@ def block_causal_lact_swiglu(
             # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
             dw0 = torch.bmm(dgate_before_act, (mlp_input * lr0i).type_as(dgate_before_act))
             dw2 = torch.bmm(dhidden_before_mul, (mlp_input * lr2i).type_as(dhidden_before_mul))
+        elif loss_type in ["unroll1", "simplify8", "simplify9", "simplify10"]:
+            # unroll the gradient calculation formula, assume using dot-product loss
+            # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
+            # gate_before_act = torch.bmm(w0, ki.transpose(1, 2))
+            # hidden_before_mul = torch.bmm(w2, ki.transpose(1, 2))
+            # hidden = (F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False) * torch.bmm(w2, ki.transpose(1, 2)))
+            # [b, dv, dh] @ [b, dh, l] -> [b, dv, l]
+            # vpi = torch.bmm(w1, (F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False) * torch.bmm(w2, ki.transpose(1, 2))))
+
+            # update: MLP(k) -> v, loss type is dot-product
+            # dvpi = -vi
+
+            # [b, dh, dv] @ [b, dv, l] -> [b, dh, l]
+            # dhidden = torch.bmm(w1.transpose(1, 2), -vi)
+            # dhidden_before_mul = (torch.bmm(w1.transpose(1, 2), -vi) * F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False))
+            # dgate = (torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2)))
+            # dgate_before_act = silu_backprop((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2))), torch.bmm(w0, ki.transpose(1, 2)))
+
+            # [b, d_2, l] @ [b, l, d_1] -> [b, d_2, d_1]
+            # in bmm two mat is fp32, but the result is bf16.
+            # it's better to cast the mat to bf16 before bmm.
+            # [b, dv, l] @ [b, l, dh] -> [b, dv, dh]
+            # it's better to cast the mat to bf16 before bmm.
+            dw1 = torch.bmm(
+                -vi, ((F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False) * torch.bmm(w2, ki.transpose(1, 2))).transpose(1, 2) * lr1i).type_as(vi)
+            )  # [b, d, d]
+            # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
+            dw0 = torch.bmm(silu_backprop((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2))), torch.bmm(w0, ki.transpose(1, 2))), (ki * lr0i).type_as(vi))
+            dw2 = torch.bmm((torch.bmm(w1.transpose(1, 2), -vi) * F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False)), (ki * lr2i).type_as(vi))
+        elif loss_type == "simplify2":
+            # remove activation function in dw1 and dw2
+            dw1 = torch.bmm(
+                -vi, ((torch.bmm(w0, ki.transpose(1, 2)) * torch.bmm(w2, ki.transpose(1, 2))).transpose(1, 2) * lr1i).type_as(vi)
+            )  # [b, d, d]
+            # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
+            dw0 = torch.bmm(silu_backprop((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2))), torch.bmm(w0, ki.transpose(1, 2))), (ki * lr0i).type_as(vi))
+            dw2 = torch.bmm((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w0, ki.transpose(1, 2))), (ki * lr2i).type_as(vi))
+        elif loss_type == "simplify5":
+            # based on simplify2, replace silu_backprop with silu
+            dw1 = torch.bmm(
+                -vi, ((torch.bmm(w0, ki.transpose(1, 2)) * torch.bmm(w2, ki.transpose(1, 2))).transpose(1, 2) * lr1i).type_as(vi)
+            )  # [b, d, d]
+            # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
+            dw0 = torch.bmm((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2))) * F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False), (ki * lr0i).type_as(vi))
+            dw2 = torch.bmm((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w0, ki.transpose(1, 2))), (ki * lr2i).type_as(vi))
+        elif loss_type == "simplify6":
+            # based on unroll1, remove the lr1
+            dw1 = torch.bmm(
+                -vi, ((F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False) * torch.bmm(w2, ki.transpose(1, 2))).transpose(1, 2)).type_as(vi)
+            )  # [b, d, d]
+            # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
+            dw0 = torch.bmm(silu_backprop((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2))), torch.bmm(w0, ki.transpose(1, 2))), (ki * lr0i).type_as(vi))
+            dw2 = torch.bmm((torch.bmm(w1.transpose(1, 2), -vi) * F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False)), (ki * lr2i).type_as(vi))
+        elif loss_type == "simplify7":
+            # based on unroll1, remove all the lr
+            dw1 = torch.bmm(
+                -vi, ((F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False) * torch.bmm(w2, ki.transpose(1, 2))).transpose(1, 2)).type_as(vi)
+            )  # [b, d, d]
+            # [b, dh, l] @ [b, l, dk] -> [b, dh, dk]
+            dw0 = torch.bmm(silu_backprop((torch.bmm(w1.transpose(1, 2), -vi) * torch.bmm(w2, ki.transpose(1, 2))), torch.bmm(w0, ki.transpose(1, 2))), (ki).type_as(vi))
+            dw2 = torch.bmm((torch.bmm(w1.transpose(1, 2), -vi) * F.silu(torch.bmm(w0, ki.transpose(1, 2)), inplace=False)), (ki).type_as(vi))
         else:
             # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
             gate_before_act = torch.bmm(w0, ki.transpose(1, 2))
@@ -237,7 +314,7 @@ def block_causal_lact_swiglu(
             vpi = torch.bmm(w1, hidden)
 
             # update: MLP(k) -> v, loss type can be arbitrary.
-            if loss_type in ["dot_product", "no_query_dot_product"]:
+            if loss_type in ["dot_product", "no_query_dot_product", "ga_dot_product"]:
                 dvpi = -vi
             elif loss_type == "vp**2":
                 dvpi = 2*vpi
@@ -262,9 +339,18 @@ def block_causal_lact_swiglu(
             dw0 = torch.bmm(dgate_before_act, (ki * lr0i).type_as(dgate_before_act))
             dw2 = torch.bmm(dhidden_before_mul, (ki * lr2i).type_as(dhidden_before_mul))
 
+            if "ga" in loss_type:
+                dw1 = -dw1
+                dw0 = -dw0
+                dw2 = -dw2
+
         if momentum is not None:
-            m_i = momentum[:, s_index:e_index, :] 
-            m_i = m_i.mean(dim=1, keepdim=True)
+            if loss_type in ["simplify8"]:
+                # momentum coeff is set as 1 for simplify8
+                m_i = momentum
+            else:
+                m_i = momentum[:, s_index:e_index, :] * lr1i
+                m_i = m_i.mean(dim=1, keepdim=True)
 
             dw0 = dw0 + dw0_momentum * m_i
             dw1 = dw1 + dw1_momentum * m_i
@@ -274,7 +360,7 @@ def block_causal_lact_swiglu(
             dw2_momentum = dw2
 
 
-        if use_muon:
+        if use_muon and loss_type not in ["simplify10"]:
             dw1 = zeropower_via_newtonschulz5(dw1)
             dw0 = zeropower_via_newtonschulz5(dw0)
             dw2 = zeropower_via_newtonschulz5(dw2)
@@ -295,21 +381,30 @@ def block_causal_lact_swiglu(
         w2 = w2 - dw2
     
         # Do channel-wise l2 norm.  conceptually like post-norm.
-        w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
-        w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
-        w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
+        if loss_type not in ["simplify9"]:
+            # ablation the weight norm
+            w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
+            w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
+            w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
         
     # for the last chunk, don't update the fast weights, directly apply the fast weights to the query.
     s_index = e_index
     e_index = seq_len
 
-    qi = q[:, :, s_index:e_index]
-    # use the last w0 and w1 to get the final output
-    # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
-    h = torch.bmm(w2, qi)
-    gate = F.silu(torch.bmm(w0, qi), inplace=True)
-    # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
-    output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
+    if loss_type in ["no_query_dot_product_fix"]:
+        # use k to update the fast weights
+        ki = k[:, s_index:e_index, :].transpose(1, 2)
+        h = torch.bmm(w2, ki)
+        gate = F.silu(torch.bmm(w0, ki), inplace=True)
+        output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
+    else:
+        qi = q[:, :, s_index:e_index]
+        # use the last w0 and w1 to get the final output
+        # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
+        h = torch.bmm(w2, qi)
+        gate = F.silu(torch.bmm(w0, qi), inplace=True)
+        # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
+        output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
 
     return output.transpose(1, 2)
 
