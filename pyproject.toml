@@ -37,10 +37,14 @@ dependencies = [
     "safetensors>=0.5.3",
     "torchtitan @ git+https://github.com/pytorch/torchtitan.git@0b44d4c",
     "tyro",
+    "psutil",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+eval = [
+    "lm_eval[ruler,hf] @ git+https://github.com/EleutherAI/lm-evaluation-harness",
+]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flame"
@@ -53,7 +57,7 @@ line_length = 127
 multi_line_output = 3
 
 [tool.uv.extra-build-dependencies]
-flash-attn = ["torch", "numpy"]
+flash-attn = ["torch", "numpy", "psutil"]
 
 [tool.uv]
 no-build-isolation-package = ["flash-attn"]
