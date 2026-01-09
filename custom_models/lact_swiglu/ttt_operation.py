@@ -161,7 +161,7 @@ def block_causal_lact_swiglu(
             gate = F.silu(torch.bmm(w0, mlp_input), inplace=True)
             # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
             output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
-        elif loss_type in ["no_query_dot_product", "no_query_dot_product_fix"]:
+        elif loss_type in ["no_query_dot_product"]:
             # use previous w0 and w1 to get the final output
             # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
             h = torch.bmm(w2, ki.transpose(1, 2))
@@ -349,7 +349,7 @@ def block_causal_lact_swiglu(
                 # momentum coeff is set as 1 for simplify8
                 m_i = momentum
             else:
-                m_i = momentum[:, s_index:e_index, :] * lr1i
+                m_i = momentum[:, s_index:e_index, :]
                 m_i = m_i.mean(dim=1, keepdim=True)
 
             dw0 = dw0 + dw0_momentum * m_i
@@ -391,7 +391,7 @@ def block_causal_lact_swiglu(
     s_index = e_index
     e_index = seq_len
 
-    if loss_type in ["no_query_dot_product_fix"]:
+    if loss_type in ["no_query_dot_product"]:
         # use k to update the fast weights
         ki = k[:, s_index:e_index, :].transpose(1, 2)
         h = torch.bmm(w2, ki)
