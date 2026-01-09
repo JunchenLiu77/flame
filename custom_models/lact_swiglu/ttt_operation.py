@@ -386,10 +386,10 @@ def block_causal_lact_swiglu(
         # Do channel-wise l2 norm.  conceptually like post-norm.
         if loss_type not in ["simplify9"]:
             # ablation the weight norm
-            w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
+            w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
             if loss_type not in ["only_w1"]:
                 # if we don't update w0 and w2, we don't need to apply weight norm on them.
-                w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
+                w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
                 w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
         
     # for the last chunk, don't update the fast weights, directly apply the fast weights to the query.
