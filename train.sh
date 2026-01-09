@@ -21,8 +21,7 @@ if [[ -z "${MASTER_ADDR}" ]]; then
   fi
 fi
 if [[ -z "${MASTER_PORT}" ]]; then
-  # Use a random port between 29500-29999 to avoid conflicts
-  export MASTER_PORT=$((29500 + RANDOM % 500))
+  export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
 fi
 
 : '
@@ -72,38 +71,34 @@ steps=$(grep -oP '(?<=--training.steps )[^ ]+' <<< "$params")
 config=$(grep -oP '(?<=--model.config )[^ ]+' <<< "$params")
 tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
 model=$(
-  python -c "import fla, sys; from transformers import AutoConfig; print(AutoConfig.from_pretrained(sys.argv[1]).to_json_string())" "$config" | jq -r '.model_type'
+  uv run python -c "from transformers import AutoConfig; print(AutoConfig.from_pretrained('$config').model_type)" 2>/dev/null || echo "unknown"
 )
 
 mkdir -p $path
-cp * $path
-cp -r configs $path
-cp -r flame   $path
-cp -r 3rdparty/flash-linear-attention/fla $path
-cp -r 3rdparty/torchtitan/torchtitan $path
+cp -r configs $path 2>/dev/null || true
+cp -r flame $path 2>/dev/null || true
+cp -r custom_models $path 2>/dev/null || true
 
-# for offline systems (only set if not already defined)
-export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
-export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
-export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
-export UV_PREVIEW_FEATURES=${UV_PREVIEW_FEATURES:-extra-build-dependencies}
+# for offline systems
+# export TRANSFORMERS_OFFLINE=1
+# export HF_DATASETS_OFFLINE=1
+# export HF_HUB_OFFLINE=1
 
-# JC: the compute nodes only have read access to the scratch directory
-export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-"$SCRATCH/datasets/fineweb-edu/sample-100BT"}
-export UV_CACHE_DIR=${UV_CACHE_DIR:-"$SCRATCH/.cache/uv"}
-export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-"$SCRATCH/.triton/cache"}
-
-# JC: the compute nodes don't have internet access
-export WANDB_DIR=${WANDB_DIR:-"$SCRATCH/.cache/wandb"}
-export WANDB_CACHE_DIR=${WANDB_CACHE_DIR:-"$SCRATCH/.cache/wandb"}
-export WANDB_MODE=${WANDB_MODE:-offline}
-
-export TOKENIZERS_PARALLELISM=false
-if [ "$date" == "" ]; then
-  date=$(date +%Y%m%d%H%M)
-fi
 RUN_NAME="$model-$(basename $path)"
-RUN_ID="$RUN_NAME-$date"
+WANDB_ID_FILE="$path/.wandb_run_id"
+
+# Persist wandb run ID for resuming: read from file if exists, otherwise generate new
+if [[ -f "$WANDB_ID_FILE" ]]; then
+  RUN_ID=$(cat "$WANDB_ID_FILE")
+  echo "Resuming wandb run: $RUN_ID"
+else
+  if [ "$date" == "" ]; then
+    date=$(date +%Y%m%d%H%M)
+  fi
+  RUN_ID="$RUN_NAME-$date"
+  echo "$RUN_ID" > "$WANDB_ID_FILE"
+  echo "Starting new wandb run: $RUN_ID"
+fi
 
 export WANDB_RESUME=allow
 if [[ -z "${WANDB_PROJECT}" ]]; then

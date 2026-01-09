@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=lact_baseline_bs1_design1
-#SBATCH --output=exp/lact_baseline_bs1_design1/%x_%j.out
-#SBATCH --error=exp/lact_baseline_bs1_design1/%x_%j.err
+#SBATCH --job-name=lact_baseline_bs1_simplify2
+#SBATCH --output=exp/lact_baseline_bs1_simplify2/%x_%j.out
+#SBATCH --error=exp/lact_baseline_bs1_simplify2/%x_%j.err
 #SBATCH --time=00-08:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
@@ -52,12 +52,12 @@ echo
 export NGPU=1
 export NNODE=1
 export WANDB_PROJECT="lact"
-export WANDB_NAME="lact_baseline_bs1_design1"
+export WANDB_NAME="lact_baseline_bs1_simplify2"
 
 srun bash train.sh \
   --job.config_file flame/models/fla.toml \
   --job.dump_folder $SCRATCH/flame/exp/$WANDB_NAME \
-  --model.config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_design1.json \
+  --model.config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_simplify2.json \
   --model.tokenizer_path fla-hub/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
@@ -84,6 +84,7 @@ srun bash train.sh \
   --checkpoint.load_step -1 \
   --checkpoint.keep_latest_k 2 \
   --metrics.log_freq 1 \
+  --metrics.enable_wandb  \
   --profiling.profile_freq 2000
 
 echo

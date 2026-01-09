@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=lact_baseline_bs2
-#SBATCH --output=exp/lact_baseline_bs2/%x_%j.out
-#SBATCH --error=exp/lact_baseline_bs2/%x_%j.err
-#SBATCH --time=00-08:00:00
+#SBATCH --job-name=lact_baseline_bs1_debug
+#SBATCH --output=exp/lact_baseline_bs1_debug/%x_%j.out
+#SBATCH --error=exp/lact_baseline_bs1_debug/%x_%j.err
+#SBATCH --time=00-01:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 
@@ -52,7 +52,7 @@ echo
 export NGPU=1
 export NNODE=1
 export WANDB_PROJECT="lact"
-export WANDB_NAME="lact_baseline_bs2"
+export WANDB_NAME="lact_baseline_bs1_debug"
 
 srun bash train.sh \
   --job.config_file flame/models/fla.toml \
@@ -65,7 +65,7 @@ srun bash train.sh \
   --lr_scheduler.warmup_steps 1024 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
-  --training.batch_size 2 \
+  --training.batch_size 1 \
   --training.seq_len 32768 \
   --training.context_len 32768 \
   --training.gradient_accumulation_steps 1 \
@@ -84,6 +84,7 @@ srun bash train.sh \
   --checkpoint.load_step -1 \
   --checkpoint.keep_latest_k 2 \
   --metrics.log_freq 1 \
+  --metrics.enable_wandb  \
   --profiling.profile_freq 2000
 
 echo

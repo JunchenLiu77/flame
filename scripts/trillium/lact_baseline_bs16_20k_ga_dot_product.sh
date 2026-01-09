@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=lact_baseline_bs1_no_query_dot_product
-#SBATCH --output=exp/lact_baseline_bs1_no_query_dot_product/%x_%j.out
-#SBATCH --error=exp/lact_baseline_bs1_no_query_dot_product/%x_%j.err
+#SBATCH --job-name=lact_baseline_bs16_20k_ga_dot_product
+#SBATCH --output=exp/lact_baseline_bs16_20k_ga_dot_product/%x_%j.out
+#SBATCH --error=exp/lact_baseline_bs16_20k_ga_dot_product/%x_%j.err
 #SBATCH --time=00-08:00:00
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=4
 
 echo "=============================================="
 echo "LaCT Training"
 echo "=============================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
-echo "GPUs: 1x H100"
+echo "GPUs: 4x H100"
 echo "Start time: $(date)"
 echo "=============================================="
 
@@ -49,15 +49,15 @@ echo "Starting training..."
 echo
 
 # Run the training job
-export NGPU=1
+export NGPU=4
 export NNODE=1
 export WANDB_PROJECT="lact"
-export WANDB_NAME="lact_baseline_bs1_no_query_dot_product"
+export WANDB_NAME="lact_baseline_bs16_20k_ga_dot_product"
 
 srun bash train.sh \
   --job.config_file flame/models/fla.toml \
   --job.dump_folder $SCRATCH/flame/exp/$WANDB_NAME \
-  --model.config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_no_query_dot_product.json \
+  --model.config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_ga_dot_product.json \
   --model.tokenizer_path fla-hub/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
@@ -65,13 +65,13 @@ srun bash train.sh \
   --lr_scheduler.warmup_steps 1024 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
-  --training.batch_size 1 \
+  --training.batch_size 4 \
   --training.seq_len 32768 \
   --training.context_len 32768 \
   --training.gradient_accumulation_steps 1 \
   --activation_checkpoint.mode selective \
   --activation_checkpoint.selective_ac_option 1 \
-  --training.steps 40960 \
+  --training.steps 20000 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
   --training.dataset HuggingFaceFW/fineweb-edu \
@@ -80,10 +80,11 @@ srun bash train.sh \
   --training.num_workers 2 \
   --training.prefetch_factor 1 \
   --training.seed 42 \
-  --checkpoint.interval 4096 \
+  --checkpoint.interval 1000 \
   --checkpoint.load_step -1 \
-  --checkpoint.keep_latest_k 2 \
+  --checkpoint.keep_latest_k 4 \
   --metrics.log_freq 1 \
+  --metrics.enable_wandb  \
   --profiling.profile_freq 2000
 
 echo
