@@ -314,10 +314,12 @@ def block_causal_lact_swiglu(
             vpi = torch.bmm(w1, hidden)
 
             # update: MLP(k) -> v, loss type can be arbitrary.
-            if loss_type in ["dot_product", "no_query_dot_product", "ga_dot_product"]:
+            if loss_type in ["dot_product", "no_query_dot_product", "ga_dot_product", "only_w1"]:
                 dvpi = -vi
             elif loss_type == "vp**2":
                 dvpi = 2*vpi
+            elif loss_type == "mse":
+                dvpi = vpi - vi
             else:
                 raise ValueError(f"Invalid loss type: {loss_type}")
 
@@ -377,15 +379,18 @@ def block_causal_lact_swiglu(
         # w2 = w2 + dw2
         # print(f"using gradient ascent")
         w1 = w1 - dw1
-        w0 = w0 - dw0
-        w2 = w2 - dw2
+        if loss_type not in ["only_w1"]:
+            w0 = w0 - dw0
+            w2 = w2 - dw2
     
         # Do channel-wise l2 norm.  conceptually like post-norm.
         if loss_type not in ["simplify9"]:
             # ablation the weight norm
             w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
-            w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
-            w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
+            if loss_type not in ["only_w1"]:
+                # if we don't update w0 and w2, we don't need to apply weight norm on them.
+                w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
+                w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
         
     # for the last chunk, don't update the fast weights, directly apply the fast weights to the query.
     s_index = e_index
