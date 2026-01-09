@@ -63,14 +63,6 @@ def block_causal_lact_swiglu(
 
         hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
 
-        # [b, dh, dv] @ [b, dv, l] -> [b, dh, l]
-        dhidden = torch.bmm(w1.transpose(1, 2), vi)
-
-        dhidden_before_mul = dhidden * F.silu(gate_before_act, inplace=False)
-
-        dgate = dhidden * hidden_before_mul
-        dgate_before_act = silu_backprop(dgate, gate_before_act)
-
         # [b, d_2, l] @ [b, l, d_1] -> [b, d_2, d_1]
         # in bmm two mat is fp32, but the result is bf16.
         # it's better to cast the mat to bf16 before bmm.
