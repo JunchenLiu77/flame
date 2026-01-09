@@ -315,11 +315,11 @@ def block_causal_lact_swiglu(
 
             # update: MLP(k) -> v, loss type can be arbitrary.
             if loss_type in ["dot_product", "no_query_dot_product", "ga_dot_product", "only_w1"]:
-                dvpi = vi
+                dvpi = -vi
             elif loss_type == "vp**2":
-                dvpi = -2*vpi
+                dvpi = 2*vpi
             elif loss_type == "mse":
-                dvpi = vi - vpi
+                dvpi = vpi - vi
             else:
                 raise ValueError(f"Invalid loss type: {loss_type}")
 
@@ -378,10 +378,10 @@ def block_causal_lact_swiglu(
         # w0 = w0 + dw0
         # w2 = w2 + dw2
         # print(f"using gradient ascent")
-        w1 = w1 + dw1
+        w1 = w1 - dw1
         if loss_type not in ["only_w1"]:
-            w0 = w0 + dw0
-            w2 = w2 + dw2
+            w0 = w0 - dw0
+            w2 = w2 - dw2
     
         # Do channel-wise l2 norm.  conceptually like post-norm.
         if loss_type not in ["simplify9"]:
