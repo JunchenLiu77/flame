@@ -24,7 +24,7 @@ def create_test_data_dict():
     lr1 = torch.randn(b, l, 1, device=device, dtype=torch.float32)
     lr2 = torch.randn(b, l, 1, device=device, dtype=torch.float32)
     chunk_size = 8
-    use_muon = False
+    use_muon = True
     momentum = torch.randn(b, l, 1, device=device, dtype=torch.float32)
 
     data_dict = {
