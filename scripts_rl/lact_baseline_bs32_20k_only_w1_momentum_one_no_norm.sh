@@ -48,7 +48,7 @@ bash train.sh \
   --training.num_workers 2 \
   --training.prefetch_factor 1 \
   --training.seed 42 \
-  --checkpoint.interval 1000 \
+  --checkpoint.interval 200 \
   --checkpoint.load_step -1 \
   --checkpoint.keep_latest_k 4 \
   --metrics.log_freq 1 \
