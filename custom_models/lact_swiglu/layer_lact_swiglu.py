@@ -204,7 +204,7 @@ class LaCTSWIGLULayer(nn.Module):
         
         self.use_momentum = use_momentum
         if self.use_momentum:
-            if ttt_loss_type != "simplify8":
+            if ttt_loss_type not in ["simplify8", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
                 self.momentum_proj = nn.Sequential(
                     nn.Linear(hidden_size, self.num_fw_heads),
                     nn.Sigmoid(),
@@ -397,7 +397,7 @@ class LaCTSWIGLULayer(nn.Module):
             fw_lr1, fw_lr2, fw_lr3 = None, None, None
 
         if self.use_momentum:
-            if self.ttt_loss_type == "simplify8":
+            if self.ttt_loss_type in ["simplify8", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
                 momentum = 1
             else:
                 momentum = self.momentum_proj(hidden_states) # [b, s, nh]
