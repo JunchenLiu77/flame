@@ -53,7 +53,8 @@ if __name__ == "__main__":
         "ga_dot_product", 
         "mse", 
         "no_query_dot_product", 
-        "only_w1"
+        "only_w1",
+        "only_w1_momentum_one"
     ]:
         data_dict["loss_type"] = loss_type
         o = block_causal_lact_swiglu(**data_dict)
