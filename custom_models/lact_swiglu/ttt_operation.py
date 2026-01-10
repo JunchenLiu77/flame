@@ -153,7 +153,7 @@ def block_causal_lact_swiglu(
         if lr0 is not None:
             lr0i = lr0[:, s_index:e_index, :]  # [b, l, d/1] fp32
 
-        if loss_type == "only_w1_momentum_one":
+        if loss_type in ["only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
             lr1i = 1.0
 
         if loss_type in ["design1", "design2"]:
@@ -317,7 +317,7 @@ def block_causal_lact_swiglu(
             vpi = torch.bmm(w1, hidden)
 
             # update: MLP(k) -> v, loss type can be arbitrary.
-            if loss_type in ["dot_product", "no_query_dot_product", "ga_dot_product", "only_w1", "only_w1_momentum_one"]:
+            if loss_type in ["dot_product", "no_query_dot_product", "ga_dot_product", "only_w1", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
                 dvpi = -vi
             elif loss_type == "vp**2":
                 dvpi = 2*vpi
@@ -357,7 +357,7 @@ def block_causal_lact_swiglu(
                 m_i = momentum[:, s_index:e_index, :]
                 m_i = m_i.mean(dim=1, keepdim=True)
             
-            if loss_type == "only_w1_momentum_one":
+            if loss_type in ["only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
                 m_i = 1.0
 
             dw0 = dw0 + dw0_momentum * m_i
@@ -385,15 +385,15 @@ def block_causal_lact_swiglu(
         # w2 = w2 + dw2
         # print(f"using gradient ascent")
         w1 = w1 - dw1
-        if loss_type not in ["only_w1", "only_w1_momentum_one"]:
+        if loss_type not in ["only_w1", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
             w0 = w0 - dw0
             w2 = w2 - dw2
     
         # Do channel-wise l2 norm.  conceptually like post-norm.
-        if loss_type not in ["simplify9"]:
+        if loss_type not in ["simplify9", "only_w1_momentum_one_no_norm"]:
             # ablation the weight norm
             w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
-            if loss_type not in ["only_w1", "only_w1_momentum_one"]:
+            if loss_type not in ["only_w1", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
                 # if we don't update w0 and w2, we don't need to apply weight norm on them.
                 w0 = w0 / (w0.norm(dim=2, keepdim=True) + 1e-5) * w0_norm
                 w2 = w2 / (w2.norm(dim=2, keepdim=True) + 1e-5) * w2_norm
