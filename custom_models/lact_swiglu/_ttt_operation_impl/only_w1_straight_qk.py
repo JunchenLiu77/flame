@@ -93,5 +93,5 @@ def block_causal_lact_swiglu(
     # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
     output[:, :, s_index:e_index] = torch.bmm(w1, qi) # straight q as hidden.
 
-    # keep w1 and w2 in the gradient graph.
-    return output.transpose(1, 2) + w1.sum() * 0.0 + w2.sum() * 0.0
+    # keep w0 and w2 in the gradient graph.
+    return output.transpose(1, 2) + w0.sum() * 0.0 + w2.sum() * 0.0
