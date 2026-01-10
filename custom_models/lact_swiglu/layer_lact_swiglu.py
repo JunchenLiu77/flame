@@ -17,7 +17,8 @@ import torch.nn.functional as F
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from .ttt_operation import block_causal_lact_swiglu, prenorm_block_causal_lact_swiglu, l2_norm
+from .ttt_operation import prenorm_block_causal_lact_swiglu, l2_norm
+from ._ttt_operation_impl import block_causal_lact_swiglu
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
