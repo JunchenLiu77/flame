@@ -182,7 +182,7 @@ class LaCTSWIGLULayer(nn.Module):
         )  # [num_fw_heads, d_out, d_h]
         
         #### Per-Token LR parameterization. 
-        if ttt_loss_type not in ["simplify7"]:
+        if ttt_loss_type not in ["simplify7", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
             self.lr_dim = int(lr_dim * 3 * self.num_fw_heads)
             self.lr_proj = nn.Linear(self.hidden_size, self.lr_dim)
             base_lr = 0.001
@@ -385,7 +385,7 @@ class LaCTSWIGLULayer(nn.Module):
         
         fw_w1 = self.w1.repeat(batch_size, 1, 1) # [nh, d_out, d_h] -> [b*nh, d_out, d_h]
 
-        if self.ttt_loss_type not in ["simplify7"]:
+        if self.ttt_loss_type not in ["simplify7", "only_w1_momentum_one", "only_w1_momentum_one_no_norm"]:
             lr = self.lr_proj(hidden_states) # [b, s, num_heads * lr_dim_per_head]
             if self.lr_parameterization == "mamba":
                 lr = torch.nn.functional.softplus(lr.float() + self.base_lr_inv)
