@@ -16,6 +16,13 @@ import custom_models  # registers LaCTSWIGLU with HF
 import torch
 torch._dynamo.disable()
 
+# Pre-download NLTK resources to avoid race conditions in multi-process
+import nltk
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab', quiet=True)
+
 
 VALID_TASKS = [
     "niah_single_1",
