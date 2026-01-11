@@ -43,12 +43,26 @@ def save_pretrained(
         logger.info(f"Initializing the model from config\n{config}")
         model = AutoModelForCausalLM.from_config(config)
         logger.info(model)
-        logger.info("Loading state dict from the checkpoint")
+        logger.info(f"Loading state dict from the checkpoint: {checkpoint_path}")
 
         # Add datetime.timedelta and io.BytesIO to safe globals
         torch.serialization.add_safe_globals([timedelta, io.BytesIO])
         # torch.load now with default weights_only=True will work
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu')['model'])
+        try:
+            state_dict = torch.load(checkpoint_path, map_location='cpu')
+            logger.info(f"Checkpoint keys: {list(state_dict.keys())}")
+            if 'model' in state_dict:
+                model_state = state_dict['model']
+            else:
+                model_state = state_dict
+            logger.info(f"Model state dict has {len(model_state)} keys")
+            model.load_state_dict(model_state, strict=False)
+            logger.info("State dict loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading state dict: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
         logger.info(f"Saving the model to {path}")
         model.save_pretrained(path)
