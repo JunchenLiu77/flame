@@ -33,7 +33,7 @@ VALID_TASKS = [
     "niah_multivalue",
 ]
 
-VALID_SEQ_LENGTHS = [4096, 8192, 16384, 32768]
+VALID_SEQ_LENGTHS = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
 def parse_args():
