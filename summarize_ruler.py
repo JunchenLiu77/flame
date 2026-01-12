@@ -77,31 +77,34 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_out_file(filepath: str) -> dict:
+def parse_out_file(filepath: str) -> list:
     """
     Parse a RULER .out file and extract results from the table output.
     
     The .out file contains a table like:
     |    Tasks    |Version|Filter|n-shot|Metric|   |Value|   |Stderr|
     |-------------|------:|------|-----:|-----:|---|----:|---|------|
-    |niah_single_2|      1|none  |     0|  4096|↑  |  0.5|±  |   N/A|
+    |niah_single_2|      1|none  |     0|  4096|↑  |-1.000|±  |   N/A|
+    |             |       |none  |     0|  8192|↑  | 0.276|±  |   N/A|
     
-    Returns dict with:
+    Returns list of dicts, each with:
         - task: task name
-        - seq_length: sequence length
+        - seq_length: sequence length (from metric column)
         - limit: number of examples
         - score: accuracy score
         - model_name: experiment/model name
+    
+    Note: Returns multiple results if the table has multiple metrics (seq lengths).
     """
     filename = os.path.basename(filepath)
     
     # Parse filename: ruler_{task}_len{seq_length}_limit{limit}.out
     match = re.match(r"ruler_(.+)_len(\d+)_limit(\d+)\.out", filename)
     if not match:
-        return None
+        return []
     
     task = match.group(1)
-    seq_length = int(match.group(2))
+    file_seq_length = int(match.group(2))  # seq_length from filename
     limit = int(match.group(3))
     
     # Extract model name from path
@@ -113,48 +116,46 @@ def parse_out_file(filepath: str) -> dict:
     except (ValueError, IndexError):
         model_name = "unknown"
     
-    # Parse the output file to find the score from the table
-    score = None
+    results = []
     try:
         with open(filepath, "r") as f:
             content = f.read()
         
-        # Primary method: parse the table output at the end of the file
-        # Format: |task_name|version|filter|n-shot|metric|arrow|value|±|stderr|
-        # Example: |niah_single_2|      1|none  |     0|  4096|↑  |  0.5|±  |   N/A|
+        # Parse all table rows - handle both formats:
+        # 1. |task_name|...|metric|↑|value|±|stderr|
+        # 2. |         |...|metric|↑|value|±|stderr|  (continuation row)
         
-        # Look for table rows with the task name
-        # The metric column contains the sequence length, value column contains the score
-        table_pattern = rf"\|{re.escape(task)}\s*\|[^|]*\|[^|]*\|[^|]*\|\s*(\d+)\s*\|[↑↓]?\s*\|\s*([\d.]+)\s*\|"
-        table_matches = re.findall(table_pattern, content)
+        # Pattern to match any table data row (task name may be empty for continuation)
+        # Matches: | task_or_empty | version | filter | n-shot | metric | arrow | value | ± | stderr |
+        row_pattern = r"\|([^|]*)\|[^|]*\|[^|]*\|[^|]*\|\s*(\d+)\s*\|[↑↓]?\s*\|\s*([-\d.]+)\s*\|"
         
-        for metric_len, value in table_matches:
-            if int(metric_len) == seq_length:
-                score = float(value)
-                break
-        
-        # Fallback: try a more flexible pattern
-        if score is None:
-            # Try matching with potential whitespace variations
-            flexible_pattern = rf"\|\s*{re.escape(task)}\s*\|.*?\|\s*{seq_length}\s*\|.*?\|\s*([\d.]+)\s*\|"
-            flex_match = re.search(flexible_pattern, content)
-            if flex_match:
-                score = float(flex_match.group(1))
+        for row_match in re.finditer(row_pattern, content):
+            task_cell = row_match.group(1).strip()
+            metric_len = int(row_match.group(2))
+            value_str = row_match.group(3)
+            
+            # Skip if value is -1 (not evaluated for this length)
+            try:
+                value = float(value_str)
+                if value < 0:
+                    continue
+            except ValueError:
+                continue
+            
+            # Use task from filename (task_cell may be empty for continuation rows)
+            results.append({
+                "task": task,
+                "seq_length": metric_len,  # Use metric from table, not filename
+                "limit": limit,
+                "score": value,
+                "model_name": model_name,
+            })
     
     except Exception as e:
         print(f"Warning: Error parsing {filepath}: {e}")
-        return None
+        return []
     
-    if score is None:
-        return None
-    
-    return {
-        "task": task,
-        "seq_length": seq_length,
-        "limit": limit,
-        "score": score,
-        "model_name": model_name,
-    }
+    return results
 
 
 def find_all_out_files(exp_dir: str) -> list:
@@ -523,10 +524,11 @@ def main():
     # Parse all files
     results = []
     for filepath in out_files:
-        result = parse_out_file(filepath)
-        if result:
-            results.append(result)
-            print(f"    Parsed: {os.path.basename(filepath)} -> {result['task']}, len={result['seq_length']}, score={result['score']:.2f}")
+        file_results = parse_out_file(filepath)
+        if file_results:
+            results.extend(file_results)
+            for result in file_results:
+                print(f"    Parsed: {os.path.basename(filepath)} -> {result['task']}, len={result['seq_length']}, score={result['score']:.2f}")
         else:
             print(f"    Warning: Could not parse {filepath}")
     
