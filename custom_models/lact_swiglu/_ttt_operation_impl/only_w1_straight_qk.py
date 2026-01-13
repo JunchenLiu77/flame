@@ -26,10 +26,6 @@ def block_causal_lact_swiglu(
     """
     del lr0, lr2 # make sure lr0 and lr2 are not used.
 
-    if not use_lr1:
-        # keep lr1 in the gradient graph but set it to 1.0
-        lr1 = lr1.sum() * 0.0 + 1.0 
-
     if weight_norm:
         # adding detach here sometimes improves stability.
         w1_norm = w1.norm(dim=2, keepdim=True)
@@ -54,8 +50,13 @@ def block_causal_lact_swiglu(
         vi = v[:, :, s_index:e_index]  # bf16
         # [b, dh, l]
         qi = q[:, :, s_index:e_index]
-        # [b, l, d/1] fp32
-        lr1i = lr1[:, s_index:e_index, :]  # [b, l, d/1] fp32
+
+        if use_lr1:
+            # [b, l, d/1] fp32
+            lr1i = lr1[:, s_index:e_index, :]  # [b, l, d/1] fp32
+        else:
+            # keep the original lr1 in the gradient graph but set it to 1.0
+            lr1i = lr1[:, s_index:e_index, :] * 0.0 + 1.0  
 
         # get the final output
         # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
