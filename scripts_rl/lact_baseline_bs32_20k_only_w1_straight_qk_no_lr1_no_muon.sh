@@ -18,7 +18,7 @@ echo
 # export NGPU=8
 # export NNODE=1
 export WANDB_PROJECT="lact"
-export WANDB_NAME="lact_baseline_bs32_20k_only_w1_straight_qk_no_lr1_no_wn"
+export WANDB_NAME="lact_baseline_bs32_20k_only_w1_straight_qk_no_lr1_no_lr1_no_muon"
 
 export MASTER_ADDR="localhost"
 
