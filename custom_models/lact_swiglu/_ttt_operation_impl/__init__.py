@@ -27,9 +27,9 @@ def block_causal_lact_swiglu(
         return _impl_only_w1(*args, **kwargs)
     elif loss_type == "ga_dot_product":
         return _impl_ga(*args, **kwargs)
-    elif loss_type == "only_w1_momentum_one":
+    elif loss_type == "only_w1_momentum_one": # ignore this one
         return _impl_only_w1_momentum_one(*args, **kwargs)
-    elif loss_type == "only_w1_momentum_one_no_norm":
+    elif loss_type == "only_w1_momentum_one_no_norm": # ignore this one
         return _impl_only_w1_momentum_one_no_norm(*args, **kwargs)
     elif loss_type == "only_w1_straight_qk":
         return _impl_only_w1_straight_qk(*args, **kwargs)
