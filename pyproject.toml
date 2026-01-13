@@ -38,6 +38,7 @@ dependencies = [
     "torchtitan @ git+https://github.com/pytorch/torchtitan.git@0b44d4c",
     "tyro",
     "psutil",
+    "matplotlib>=3.10.8",
 ]
 
 [project.optional-dependencies]
