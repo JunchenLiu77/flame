@@ -1,11 +1,30 @@
 #!/bin/bash
-# Evaluate per-position perplexity on Book3 dataset
+# Evaluate per-position perplexity on Book3 dataset (Multi-GPU)
 # This shows how model perplexity changes at different positions within a sequence
+#
+# Usage:
+#   # Single GPU
+#   ./scripts_rl/eval_ppl_by_position.sh --model_path exp/model
+#
+#   # Multi-GPU (8 GPUs)
+#   ./scripts_rl/eval_ppl_by_position.sh --model_path exp/model --num_gpus 8
 
 # Environment variables
 export OMP_NUM_THREADS=24
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+# For SLURM: use the first node as master
+if [[ -z "${MASTER_ADDR}" ]]; then
+  if [[ -n "${SLURM_NODELIST}" ]]; then
+    export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+  else
+    export MASTER_ADDR="localhost"
+  fi
+fi
+if [[ -z "${MASTER_PORT}" ]]; then
+  export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
+fi
 
 # Default values
 MODEL_PATH=""
@@ -16,6 +35,7 @@ NUM_SAMPLES=""
 TARGET_TOKENS="2.5e9"
 DATASET_PATH="/datasets/DL3DV-DSO/book3"
 OUTPUT_DIR=""
+NUM_GPUS=1
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -52,6 +72,10 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --num_gpus)
+            NUM_GPUS="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -75,6 +99,7 @@ if [[ -z "$MODEL_PATH" ]]; then
     echo "  --target_tokens      Target total tokens to evaluate (default: 2.5e9)"
     echo "  --dataset_path       Path to Book3 dataset"
     echo "  --output_dir         Output directory"
+    echo "  --num_gpus           Number of GPUs to use (default: 1)"
     exit 1
 fi
 
@@ -87,11 +112,16 @@ echo "  Max Seq Length: $MAX_SEQ_LENGTH"
 echo "  Position Interval: $POSITION_INTERVAL"
 echo "  Target Tokens: $TARGET_TOKENS"
 echo "  Num Samples: ${NUM_SAMPLES:-'(auto from target_tokens)'}"
+echo "  Num GPUs: $NUM_GPUS"
+if [[ "$NUM_GPUS" -gt 1 ]]; then
+    echo "  Master Addr: $MASTER_ADDR"
+    echo "  Master Port: $MASTER_PORT"
+fi
 echo "=============================================="
 echo
 
-# Build command
-CMD="uv run python eval_ppl_by_position.py \
+# Build Python arguments
+PYTHON_ARGS="eval_ppl_by_position.py \
     --model_path \"$MODEL_PATH\" \
     --max_seq_length $MAX_SEQ_LENGTH \
     --position_interval $POSITION_INTERVAL \
@@ -99,18 +129,28 @@ CMD="uv run python eval_ppl_by_position.py \
     --dataset_path \"$DATASET_PATH\""
 
 if [[ -n "$NUM_SAMPLES" ]]; then
-    CMD="$CMD --num_samples $NUM_SAMPLES"
+    PYTHON_ARGS="$PYTHON_ARGS --num_samples $NUM_SAMPLES"
 fi
 
 if [[ -n "$TOKENIZER" ]]; then
-    CMD="$CMD --tokenizer \"$TOKENIZER\""
+    PYTHON_ARGS="$PYTHON_ARGS --tokenizer \"$TOKENIZER\""
 fi
 
 if [[ -n "$OUTPUT_DIR" ]]; then
-    CMD="$CMD --output_dir \"$OUTPUT_DIR\""
+    PYTHON_ARGS="$PYTHON_ARGS --output_dir \"$OUTPUT_DIR\""
 fi
 
 # Run the evaluation
+if [[ "$NUM_GPUS" -gt 1 ]]; then
+    echo "Running with torchrun (${NUM_GPUS} GPUs)..."
+    CMD="uv run torchrun --nproc_per_node=$NUM_GPUS --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT $PYTHON_ARGS"
+else
+    echo "Running with single GPU..."
+    CMD="uv run python $PYTHON_ARGS"
+fi
+
+echo "Command: $CMD"
+echo
 eval $CMD
 
 echo

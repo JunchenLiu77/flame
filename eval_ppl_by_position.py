@@ -5,6 +5,13 @@ This computes loss at different positions within long sequences to show
 how the model performs as context length increases.
 
 Output: CSV with columns [position, avg_loss, perplexity, num_samples]
+
+Usage:
+    # Single GPU
+    python eval_ppl_by_position.py --model_path exp/model
+
+    # Multi-GPU (8 GPUs)
+    torchrun --nproc_per_node=8 eval_ppl_by_position.py --model_path exp/model
 """
 
 import argparse
@@ -12,13 +19,13 @@ import csv
 import glob
 import os
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 
 import custom_models  # registers LaCTSWIGLU with HF
 
 import pyarrow.parquet as pq
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -81,17 +88,50 @@ def parse_args():
         default=BOOK3_PATH,
         help=f"Path to Book3 dataset (default: {BOOK3_PATH})",
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to use (default: cuda)",
-    )
     return parser.parse_args()
 
 
+# ============================================================================
+# Distributed utilities
+# ============================================================================
+
+def setup_distributed():
+    """Initialize distributed training if available."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        
+        return rank, world_size, local_rank
+    else:
+        return 0, 1, 0
+
+
+def cleanup_distributed(world_size: int):
+    """Cleanup distributed process group."""
+    if world_size > 1:
+        dist.destroy_process_group()
+
+
+def is_main_process(rank: int) -> bool:
+    return rank == 0
+
+
+def print_rank0(msg: str, rank: int):
+    """Print only on rank 0."""
+    if is_main_process(rank):
+        print(msg)
+
+
+# ============================================================================
+# Data loading
+# ============================================================================
+
 def load_book3_texts(dataset_path: str):
-    """Load all texts from Book3 parquet files."""
+    """Load all texts from Book3 parquet files (generator)."""
     parquet_files = sorted(glob.glob(os.path.join(dataset_path, "*.parquet")))
     
     if not parquet_files:
@@ -118,66 +158,78 @@ def load_book3_texts(dataset_path: str):
                 yield text
 
 
-def get_long_sequences(texts, tokenizer, max_seq_length: int, num_samples: int):
+def tokenize_all_sequences(texts, tokenizer, max_seq_length: int, num_samples: int):
     """
-    Get long sequences of at least max_seq_length tokens.
-    Concatenates multiple documents if needed.
-    Yields sequences one at a time (streaming) to show progress.
+    Tokenize texts and create fixed-length sequences.
+    Returns a list of tensors for distribution across GPUs.
     """
     buffer = []
-    samples_collected = 0
+    sequences = []
     
     for text in texts:
         tokens = tokenizer(text, return_attention_mask=False)['input_ids']
         buffer.extend(tokens)
         
-        while len(buffer) >= max_seq_length and samples_collected < num_samples:
-            # Extract exactly max_seq_length tokens
+        while len(buffer) >= max_seq_length and len(sequences) < num_samples:
             chunk = buffer[:max_seq_length]
             buffer = buffer[max_seq_length:]
+            sequences.append(torch.tensor(chunk, dtype=torch.long))
             
-            yield torch.tensor(chunk, dtype=torch.long)
-            samples_collected += 1
-            
-            if samples_collected >= num_samples:
-                return
+            if len(sequences) >= num_samples:
+                break
+        
+        if len(sequences) >= num_samples:
+            break
+    
+    return sequences
 
+
+# ============================================================================
+# Evaluation
+# ============================================================================
 
 @torch.no_grad()
 def evaluate_per_position(
     model,
-    tokenizer,
-    texts,
+    sequences: list,
     max_seq_length: int,
     position_interval: int,
-    num_samples: int,
     device: str,
-    output_csv: str,
+    rank: int = 0,
+    world_size: int = 1,
 ):
     """
     Evaluate per-position perplexity.
     
     For each position p, we compute the average loss of predicting token at position p
     given all previous tokens [0, p-1].
+    
+    In multi-GPU mode, each GPU processes a subset of sequences (round-robin).
     """
     model.eval()
     
     # Dictionary to accumulate loss at each position
-    # position -> (total_loss, count)
+    # position -> [total_loss, count]
     position_losses = defaultdict(lambda: [0.0, 0])
     
     # Loss function (no reduction - we want per-token loss)
     criterion = nn.CrossEntropyLoss(reduction='none')
     
-    print(f"\nStarting evaluation (tokenization + inference)...")
-    print(f"Processing {num_samples} sequences of length {max_seq_length}")
+    # Determine which sequences this rank processes
+    my_indices = [i for i in range(len(sequences)) if i % world_size == rank]
     
-    # Process sequences one by one with progress bar
-    seq_count = 0
-    for input_ids in tqdm(get_long_sequences(texts, tokenizer, max_seq_length, num_samples), 
-                          total=num_samples, desc="Tokenizing & evaluating"):
-        seq_count += 1
-        input_ids = input_ids.unsqueeze(0).to(device)  # [1, seq_len]
+    if world_size > 1:
+        print(f"[Rank {rank}] Processing {len(my_indices)} sequences")
+    else:
+        print(f"\nStarting evaluation...")
+        print(f"Processing {len(sequences)} sequences of length {max_seq_length}")
+    
+    # Process sequences assigned to this rank
+    pbar = tqdm(my_indices, desc=f"GPU {rank}" if world_size > 1 else "Evaluating", 
+                position=rank if world_size > 1 else 0)
+    
+    for idx in pbar:
+        input_ids = sequences[idx].unsqueeze(0).to(device)  # [1, seq_len]
         
         # Forward pass
         outputs = model(input_ids)
@@ -202,19 +254,65 @@ def evaluate_per_position(
             position_losses[position][0] += loss
             position_losses[position][1] += 1
     
-    # Compute average loss at each position interval
-    results = []
-    positions = sorted(position_losses.keys())
+    return position_losses
+
+
+def reduce_position_losses(local_losses: dict, world_size: int, local_rank: int) -> dict:
+    """Reduce position losses across all ranks using all_reduce."""
+    if world_size == 1:
+        return local_losses
     
+    device = f"cuda:{local_rank}"
+    
+    # Find global max position
+    local_max_pos = max(local_losses.keys()) if local_losses else 0
+    max_pos_tensor = torch.tensor([local_max_pos], dtype=torch.long, device=device)
+    dist.all_reduce(max_pos_tensor, op=dist.ReduceOp.MAX)
+    global_max_pos = max_pos_tensor.item()
+    
+    if global_max_pos == 0:
+        return local_losses
+    
+    # Create tensors for total_loss and count for each position
+    total_loss_tensor = torch.zeros(global_max_pos, dtype=torch.float64, device=device)
+    count_tensor = torch.zeros(global_max_pos, dtype=torch.long, device=device)
+    
+    for pos, (total_loss, count) in local_losses.items():
+        if 0 < pos <= global_max_pos:
+            total_loss_tensor[pos - 1] = total_loss
+            count_tensor[pos - 1] = count
+    
+    # All-reduce to sum across ranks
+    dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+    
+    # Convert back to dict
+    merged_losses = defaultdict(lambda: [0.0, 0])
+    for pos in range(1, global_max_pos + 1):
+        total_loss = total_loss_tensor[pos - 1].item()
+        count = count_tensor[pos - 1].item()
+        if count > 0:
+            merged_losses[pos] = [total_loss, count]
+    
+    return merged_losses
+
+
+def compute_and_save_results(
+    position_losses: dict,
+    max_seq_length: int,
+    position_interval: int,
+    output_csv: str,
+):
+    """Compute final results and save to CSV."""
     # Group by intervals
     interval_losses = defaultdict(lambda: [0.0, 0])
-    for pos in positions:
-        # Round to nearest interval
+    for pos, (total_loss, count) in position_losses.items():
         interval_pos = ((pos - 1) // position_interval + 1) * position_interval
-        interval_losses[interval_pos][0] += position_losses[pos][0]
-        interval_losses[interval_pos][1] += position_losses[pos][1]
+        interval_losses[interval_pos][0] += total_loss
+        interval_losses[interval_pos][1] += count
     
     # Compute final results
+    results = []
     print(f"\nPer-position perplexity results:")
     print(f"{'Position':<12} {'Avg Loss':<12} {'Perplexity':<12} {'Samples':<12}")
     print("-" * 48)
@@ -238,44 +336,45 @@ def evaluate_per_position(
             print(f"{pos:<12} {avg_loss:<12.4f} {ppl:<12.2f} {count:<12}")
     
     # Save to CSV
-    save_results_to_csv(results, output_csv)
-    print(f"\nResults saved to: {output_csv}")
+    if results:
+        fieldnames = ["position", "avg_loss", "perplexity", "num_samples"]
+        with open(output_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in results:
+                writer.writerow(row)
+        print(f"\nResults saved to: {output_csv}")
     
     return results
 
 
-def save_results_to_csv(results: list, output_csv: str):
-    """Save results to CSV file."""
-    if not results:
-        return
-    
-    fieldnames = ["position", "avg_loss", "perplexity", "num_samples"]
-    
-    with open(output_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in results:
-            writer.writerow(row)
-
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
     args = parse_args()
+    
+    # Setup distributed
+    rank, world_size, local_rank = setup_distributed()
+    device = f"cuda:{local_rank}"
     
     # Determine number of samples
     if args.num_samples is not None:
         num_samples = args.num_samples
     else:
-        # Calculate from target_tokens
         num_samples = int(args.target_tokens / args.max_seq_length)
     
-    print(f"\n{'='*60}")
-    print(f"Per-Position Perplexity Evaluation")
-    print(f"{'='*60}")
-    print(f"  Model path: {args.model_path}")
-    print(f"  Max sequence length: {args.max_seq_length}")
-    print(f"  Position interval: {args.position_interval}")
-    print(f"  Target tokens: {args.target_tokens:,.0f}")
-    print(f"  Number of samples: {num_samples:,} (= {num_samples * args.max_seq_length:,.0f} tokens)")
+    print_rank0(f"\n{'='*60}", rank)
+    print_rank0(f"Per-Position Perplexity Evaluation", rank)
+    print_rank0(f"{'='*60}", rank)
+    print_rank0(f"  Model path: {args.model_path}", rank)
+    print_rank0(f"  Max sequence length: {args.max_seq_length}", rank)
+    print_rank0(f"  Position interval: {args.position_interval}", rank)
+    print_rank0(f"  Target tokens: {args.target_tokens:,.0f}", rank)
+    print_rank0(f"  Number of samples: {num_samples:,} (= {num_samples * args.max_seq_length:,.0f} tokens)", rank)
+    if world_size > 1:
+        print_rank0(f"  World size: {world_size} GPUs", rank)
     
     # Determine output directory
     if args.output_dir:
@@ -283,11 +382,15 @@ def main():
     else:
         output_dir = Path(args.model_path) / "eval"
     
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if is_main_process(rank):
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    if world_size > 1:
+        dist.barrier()
     
     # Load tokenizer
     tokenizer_path = args.tokenizer if args.tokenizer else args.model_path
-    print(f"\nLoading tokenizer from {tokenizer_path}...")
+    print_rank0(f"\nLoading tokenizer from {tokenizer_path}...", rank)
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_path,
         trust_remote_code=True,
@@ -295,37 +398,75 @@ def main():
     )
     
     # Load model
-    print(f"Loading model from {args.model_path}...")
+    print_rank0(f"Loading model from {args.model_path}...", rank)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-    ).to(args.device)
+    ).to(device)
     
-    print(f"Model loaded: {type(model).__name__}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print_rank0(f"Model loaded: {type(model).__name__}", rank)
+    print_rank0(f"Parameters: {sum(p.numel() for p in model.parameters()):,}", rank)
     
-    # Load texts
-    texts = load_book3_texts(args.dataset_path)
+    # Load and tokenize texts (only on rank 0, then broadcast)
+    if is_main_process(rank):
+        print(f"\nLoading dataset from {args.dataset_path}...")
+        texts = load_book3_texts(args.dataset_path)
+        
+        print(f"Tokenizing and creating {num_samples} sequences...")
+        sequences = tokenize_all_sequences(texts, tokenizer, args.max_seq_length, num_samples)
+        print(f"Created {len(sequences)} sequences")
+        
+        # Stack into tensor for broadcasting
+        sequences_tensor = torch.stack(sequences)  # [num_samples, max_seq_length]
+    else:
+        sequences_tensor = torch.zeros(num_samples, args.max_seq_length, dtype=torch.long)
     
-    # Output file
-    output_csv = output_dir / f"ppl_by_position_len{args.max_seq_length}_n{num_samples}.csv"
+    # Broadcast sequences to all ranks
+    if world_size > 1:
+        print_rank0("Broadcasting sequences to all ranks...", rank)
+        sequences_tensor = sequences_tensor.to(device)
+        dist.broadcast(sequences_tensor, src=0)
+        sequences_tensor = sequences_tensor.cpu()
+        print_rank0("Broadcast complete!", rank)
+        dist.barrier()
+    
+    # Convert back to list
+    sequences = [sequences_tensor[i] for i in range(len(sequences_tensor))]
     
     # Evaluate
-    results = evaluate_per_position(
+    position_losses = evaluate_per_position(
         model=model,
-        tokenizer=tokenizer,
-        texts=texts,
+        sequences=sequences,
         max_seq_length=args.max_seq_length,
         position_interval=args.position_interval,
-        num_samples=num_samples,
-        device=args.device,
-        output_csv=str(output_csv),
+        device=device,
+        rank=rank,
+        world_size=world_size,
     )
     
-    print(f"\n{'='*60}")
-    print(f"Evaluation Complete!")
-    print(f"{'='*60}")
+    # Synchronize and reduce results
+    if world_size > 1:
+        dist.barrier()
+        print_rank0("\nReducing results across GPUs...", rank)
+        position_losses = reduce_position_losses(position_losses, world_size, local_rank)
+    
+    # Save results (only on rank 0)
+    if is_main_process(rank):
+        output_csv = output_dir / f"ppl_by_position_len{args.max_seq_length}_n{num_samples}.csv"
+        compute_and_save_results(
+            position_losses=position_losses,
+            max_seq_length=args.max_seq_length,
+            position_interval=args.position_interval,
+            output_csv=str(output_csv),
+        )
+        
+        print(f"\n{'='*60}")
+        print(f"Evaluation Complete!")
+        print(f"{'='*60}")
+    
+    # Cleanup
+    cleanup_distributed(world_size)
 
 
 if __name__ == "__main__":
