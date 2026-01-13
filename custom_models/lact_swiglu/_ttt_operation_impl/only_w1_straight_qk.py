@@ -18,14 +18,21 @@ def block_causal_lact_swiglu(
     chunk_size: int = 2048,  # test-time training chunk size
     use_muon: bool = False,
     momentum: torch.Tensor = None,  # [b, s, 1]
+    weight_norm: bool = True,
+    use_lr1: bool = True,
 ):
     """
     Only do gradient ascent on w1.
     """
     del lr0, lr2 # make sure lr0 and lr2 are not used.
 
-    # adding detach here sometimes improves stability.
-    w1_norm = w1.norm(dim=2, keepdim=True)
+    if not use_lr1:
+        # keep lr1 in the gradient graph but set it to 1.0
+        lr1 = lr1.sum() * 0.0 + 1.0 
+
+    if weight_norm:
+        # adding detach here sometimes improves stability.
+        w1_norm = w1.norm(dim=2, keepdim=True)
 
     if momentum is not None:
         dw1_momentum = torch.zeros_like(w1)
@@ -81,8 +88,9 @@ def block_causal_lact_swiglu(
 
         w1 = w1 + dw1
 
-        # Do channel-wise l2 norm.  conceptually like post-norm.
-        w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
+        if weight_norm:
+            # Do channel-wise l2 norm.  conceptually like post-norm.
+            w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
 
     # for the last chunk, don't update the fast weights, directly apply the fast weights to the query.
     s_index = e_index

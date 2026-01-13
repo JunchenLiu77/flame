@@ -16,6 +16,14 @@ def block_causal_lact_swiglu(
 ):
     assert "loss_type" in kwargs, "loss_type is required"
     loss_type = kwargs.pop("loss_type")
+
+    # magic strings
+    if "no_wn" in loss_type:
+        kwargs["weight_norm"] = False
+        loss_type = loss_type.replace("_no_wn", "")
+    if "no_lr1" in loss_type:
+        kwargs["use_lr1"] = False
+        loss_type = loss_type.replace("_no_lr1", "")
     
     if loss_type == "dot_product":
         return _impl_original(*args, **kwargs)
