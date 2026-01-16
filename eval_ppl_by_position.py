@@ -137,8 +137,6 @@ def load_book3_texts(dataset_path: str):
     if not parquet_files:
         raise FileNotFoundError(f"No parquet files found in {dataset_path}")
     
-    print(f"Found {len(parquet_files)} parquet files")
-    
     for parquet_path in parquet_files:
         table = pq.read_table(parquet_path)
         
@@ -158,30 +156,41 @@ def load_book3_texts(dataset_path: str):
                 yield text
 
 
-def tokenize_all_sequences(texts, tokenizer, max_seq_length: int, num_samples: int):
+def get_sequences_for_rank(
+    texts,
+    tokenizer,
+    max_seq_length: int,
+    num_samples: int,
+    rank: int,
+    world_size: int,
+):
     """
-    Tokenize texts and create fixed-length sequences.
-    Returns a list of tensors for distribution across GPUs.
+    Tokenize texts and yield sequences assigned to this rank.
+    Each rank processes sequences where global_idx % world_size == rank.
+    All ranks tokenize the same data but only keep their assigned sequences.
     """
     buffer = []
-    sequences = []
+    global_idx = 0
     
     for text in texts:
         tokens = tokenizer(text, return_attention_mask=False)['input_ids']
         buffer.extend(tokens)
         
-        while len(buffer) >= max_seq_length and len(sequences) < num_samples:
+        while len(buffer) >= max_seq_length and global_idx < num_samples:
             chunk = buffer[:max_seq_length]
             buffer = buffer[max_seq_length:]
-            sequences.append(torch.tensor(chunk, dtype=torch.long))
             
-            if len(sequences) >= num_samples:
-                break
+            # Only yield if this sequence is assigned to this rank
+            if global_idx % world_size == rank:
+                yield torch.tensor(chunk, dtype=torch.long)
+            
+            global_idx += 1
+            
+            if global_idx >= num_samples:
+                return
         
-        if len(sequences) >= num_samples:
-            break
-    
-    return sequences
+        if global_idx >= num_samples:
+            return
 
 
 # ============================================================================
@@ -191,9 +200,10 @@ def tokenize_all_sequences(texts, tokenizer, max_seq_length: int, num_samples: i
 @torch.no_grad()
 def evaluate_per_position(
     model,
-    sequences: list,
+    tokenizer,
+    texts,
     max_seq_length: int,
-    position_interval: int,
+    num_samples: int,
     device: str,
     rank: int = 0,
     world_size: int = 1,
@@ -215,21 +225,25 @@ def evaluate_per_position(
     # Loss function (no reduction - we want per-token loss)
     criterion = nn.CrossEntropyLoss(reduction='none')
     
-    # Determine which sequences this rank processes
-    my_indices = [i for i in range(len(sequences)) if i % world_size == rank]
+    # Calculate how many sequences this rank will process
+    my_num_samples = len([i for i in range(num_samples) if i % world_size == rank])
     
     if world_size > 1:
-        print(f"[Rank {rank}] Processing {len(my_indices)} sequences")
+        print(f"[Rank {rank}] Processing {my_num_samples} sequences (tokenizing on-the-fly)")
     else:
         print(f"\nStarting evaluation...")
-        print(f"Processing {len(sequences)} sequences of length {max_seq_length}")
+        print(f"Processing {num_samples} sequences of length {max_seq_length}")
     
     # Process sequences assigned to this rank
-    pbar = tqdm(my_indices, desc=f"GPU {rank}" if world_size > 1 else "Evaluating", 
-                position=rank if world_size > 1 else 0)
+    pbar = tqdm(
+        get_sequences_for_rank(texts, tokenizer, max_seq_length, num_samples, rank, world_size),
+        total=my_num_samples,
+        desc=f"GPU {rank}" if world_size > 1 else "Evaluating",
+        position=rank if world_size > 1 else 0,
+    )
     
-    for idx in pbar:
-        input_ids = sequences[idx].unsqueeze(0).to(device)  # [1, seq_len]
+    for input_ids in pbar:
+        input_ids = input_ids.unsqueeze(0).to(device)  # [1, seq_len]
         
         # Forward pass
         outputs = model(input_ids)
@@ -408,38 +422,17 @@ def main():
     print_rank0(f"Model loaded: {type(model).__name__}", rank)
     print_rank0(f"Parameters: {sum(p.numel() for p in model.parameters()):,}", rank)
     
-    # Load and tokenize texts (only on rank 0, then broadcast)
-    if is_main_process(rank):
-        print(f"\nLoading dataset from {args.dataset_path}...")
-        texts = load_book3_texts(args.dataset_path)
-        
-        print(f"Tokenizing and creating {num_samples} sequences...")
-        sequences = tokenize_all_sequences(texts, tokenizer, args.max_seq_length, num_samples)
-        print(f"Created {len(sequences)} sequences")
-        
-        # Stack into tensor for broadcasting
-        sequences_tensor = torch.stack(sequences)  # [num_samples, max_seq_length]
-    else:
-        sequences_tensor = torch.zeros(num_samples, args.max_seq_length, dtype=torch.long)
+    # Load texts (generator - each rank reads independently)
+    print_rank0(f"\nLoading dataset from {args.dataset_path}...", rank)
+    texts = load_book3_texts(args.dataset_path)
     
-    # Broadcast sequences to all ranks
-    if world_size > 1:
-        print_rank0("Broadcasting sequences to all ranks...", rank)
-        sequences_tensor = sequences_tensor.to(device)
-        dist.broadcast(sequences_tensor, src=0)
-        sequences_tensor = sequences_tensor.cpu()
-        print_rank0("Broadcast complete!", rank)
-        dist.barrier()
-    
-    # Convert back to list
-    sequences = [sequences_tensor[i] for i in range(len(sequences_tensor))]
-    
-    # Evaluate
+    # Evaluate (each rank tokenizes and processes its own subset)
     position_losses = evaluate_per_position(
         model=model,
-        sequences=sequences,
+        tokenizer=tokenizer,
+        texts=texts,
         max_seq_length=args.max_seq_length,
-        position_interval=args.position_interval,
+        num_samples=num_samples,
         device=device,
         rank=rank,
         world_size=world_size,
