@@ -26,80 +26,68 @@ def block_causal_lact_swiglu(
     del lr0, lr2 # make sure lr0 and lr2 are not used.
     assert not weight_norm, "parallel form does not support weight norm."
 
+    b, l, dk = q.shape
+    dv = v.shape[-1]
+    dh = w0.shape[1]
+    n_blocks = (l + chunk_size - 1) // chunk_size
+    l_pad = n_blocks * chunk_size
+    pad = l_pad - l
+
+    # 1. Concatenate weights for single projection launch
+    # [b, 2*dh, dk]
+    w02 = torch.cat([w0, w2], dim=1)
+    
+    # 2. Prepare inputs (Flatten B and N)
+    q_pad = F.pad(q, (0, 0, 0, pad)) if pad > 0 else q
+    k_pad = F.pad(k, (0, 0, 0, pad)) if pad > 0 else k
+    v_pad = F.pad(v, (0, 0, 0, pad)) if pad > 0 else v
+    
+    q_flat = q_pad.view(b * n_blocks, chunk_size, dk)
+    k_flat = k_pad.view(b * n_blocks, chunk_size, dk)
+    v_flat = v_pad.view(b * n_blocks, chunk_size, dv)
+
+    # 3. Single BMM for Gate & Hidden (instead of two)
+    # [b*n, dk, c] -> [b*n, 2*dh, c]
+    w02_exp = w02.repeat_interleave(n_blocks, dim=0)
+    z_all = torch.bmm(w02_exp, k_flat.transpose(1, 2))
+    
+    # Slice gate and hidden
+    gate_k, hidden_k = z_all.chunk(2, dim=1)
+    # Fused SiLU and Mul
+    gated_k = F.silu(gate_k) * hidden_k # [b*n, dh, c]
+
+    # 4. Compute dw1 using BMM (Replaces einsum)
+    # Pre-multiply v by lr1 to simplify outer product
+    lr1_pad = F.pad(lr1, (0, 0, 0, pad)) if pad > 0 else lr1
+    v_scaled = v_flat * lr1_pad.view(b * n_blocks, chunk_size, 1)
+    
+    # [b*n, dv, c] @ [b*n, c, dh] -> [b*n, dv, dh]
+    dw1 = torch.bmm(v_scaled.transpose(1, 2), gated_k.transpose(1, 2))
+    dw1 = dw1.view(b, n_blocks, dv, dh)
+
+    # 5. Momentum Recurrence
     if momentum is not None:
-        dw1_momentum = torch.zeros_like(w1)
+        m_pad = F.pad(momentum, (0, 0, 0, pad)) if pad > 0 else momentum
+        m_blk = m_pad.view(b, n_blocks, chunk_size).mean(dim=2, keepdim=True)
+        # Parallel scan via cumprod/cumsum
+        m_prod = m_blk.cumprod(dim=1).unsqueeze(-1)
+        dw1 = m_prod * torch.cumsum(dw1 / (m_prod + 1e-8), dim=1)
 
-    q = q.transpose(1, 2)  # [b, dk, l]
-    v = v.transpose(1, 2)
+    if use_muon:
+        # Use single flattened call for Muon
+        dw1 = zeropower_via_newtonschulz5(dw1.reshape(-1, dv, dh)).reshape_as(dw1)
 
-    output = torch.zeros_like(v)
+    # 6. Prefix-sum for w1
+    prefix_exclusive = torch.cumsum(dw1, dim=1) - dw1
+    w1_before = prefix_exclusive + w1.unsqueeze(1)
 
-    e_index = 0
-    seq_len = k.shape[1]
-    for i in range(0, seq_len - chunk_size, chunk_size):
-        s_index = i
-        e_index = s_index + chunk_size
-
-        # [b, l, dk]
-        ki = k[:, s_index:e_index, :]  # bf16
-        # [b, dv, l]
-        vi = v[:, :, s_index:e_index]  # bf16
-        # [b, dh, l]
-        qi = q[:, :, s_index:e_index]
-        # [b, l, d/1] fp32
-        lr1i = lr1[:, s_index:e_index, :]  # [b, l, d/1] fp32
-
-        # use previous w0 and w1 to get the final output
-        # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
-        h = torch.bmm(w2, qi)
-        gate = F.silu(torch.bmm(w0, qi), inplace=True)
-        # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
-        output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
-
-        # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
-        gate_before_act = torch.bmm(w0, ki.transpose(1, 2))
-        hidden_before_mul = torch.bmm(w2, ki.transpose(1, 2))
-
-        hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul
-
-        # [b, d_2, l] @ [b, l, d_1] -> [b, d_2, d_1]
-        # in bmm two mat is fp32, but the result is bf16.
-        # it's better to cast the mat to bf16 before bmm.
-        # [b, dv, l] @ [b, l, dh] -> [b, dv, dh]
-        # it's better to cast the mat to bf16 before bmm.
-        dw1 = torch.bmm(vi, (hidden.transpose(1, 2) * lr1i).type_as(vi))  # [b, d, d]
-
-        if momentum is not None:
-            m_i = momentum[:, s_index:e_index, :]
-            m_i = m_i.mean(dim=1, keepdim=True)
-
-            dw1 = dw1 + dw1_momentum * m_i
-            dw1_momentum = dw1
-
-        if use_muon:
-            dw1 = zeropower_via_newtonschulz5(dw1)
-            # legacy code for different global lr for muon. Conclusion: 1.0 is good
-            # if muon_w0_lr is not None:
-            #     # lr is fp32 (after softplus)
-            #     # in future version, we can cast it before input. TODO
-            #     dw1 = (dw1 * muon_w1_lr).type_as(w1)
-
-        w1 = w1 + dw1
-
-        if weight_norm:
-            # Do channel-wise l2 norm.  conceptually like post-norm.
-            w1 = w1 / (w1.norm(dim=2, keepdim=True) + 1e-5) * w1_norm
-
-    # for the last chunk, don't update the fast weights, directly apply the fast weights to the query.
-    s_index = e_index
-    e_index = seq_len
-
-    qi = q[:, :, s_index:e_index]
-    # use the last w0 and w1 to get the final output
-    # [b, dh, dk] @ [b, dk, l] -> [b, dh, l]
-    h = torch.bmm(w2, qi)
-    gate = F.silu(torch.bmm(w0, qi), inplace=True)
-    # [b, dv, dh] @ [b, dh, l] -> [b, dv, l] -> [b, l, dv]
-    output[:, :, s_index:e_index] = torch.bmm(w1, gate * h)
-
-    return output.transpose(1, 2)
+    # 7. Final Output Projection
+    z_q = torch.bmm(w02_exp, q_flat.transpose(1, 2))
+    gate_q, hidden_q = z_q.chunk(2, dim=1)
+    gated_q = F.silu(gate_q) * hidden_q
+    
+    # [b*n, dv, dh] @ [b*n, dh, c] -> [b*n, dv, c]
+    out = torch.bmm(w1_before.view(b * n_blocks, dv, dh), gated_q)
+    
+    out = out.transpose(1, 2).reshape(b, l_pad, dv)
+    return out[:, :l, :]

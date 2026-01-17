@@ -8,7 +8,7 @@ from .ga import block_causal_lact_swiglu as _impl_ga
 from .only_w1_momentum_one import block_causal_lact_swiglu as _impl_only_w1_momentum_one
 from .only_w1_momentum_one_no_norm import block_causal_lact_swiglu as _impl_only_w1_momentum_one_no_norm
 from .only_w1_straight_qk import block_causal_lact_swiglu as _impl_only_w1_straight_qk
-
+from .only_w1_no_wn_parallel import block_causal_lact_swiglu as _impl_only_w1_no_wn_parallel
 
 def block_causal_lact_swiglu(
     *args,
@@ -41,5 +41,7 @@ def block_causal_lact_swiglu(
         return _impl_only_w1_momentum_one_no_norm(*args, **kwargs)
     elif loss_type == "only_w1_straight_qk":
         return _impl_only_w1_straight_qk(*args, **kwargs)
+    elif loss_type == "only_w1_parallel":
+        return _impl_only_w1_no_wn_parallel(*args, **kwargs)
     else:
         raise ValueError(f"Invalid loss type: {loss_type}")
