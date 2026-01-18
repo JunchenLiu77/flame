@@ -22,6 +22,13 @@ def block_causal_lact_swiglu(
 ):
     """
     Only do gradient ascent on w1. parallel form is copied from parallel/only_w1_no_wn.py
+    
+    About precision (following original.py convention):
+        w0, w1, w2 are mostly likely fp32.
+        q, k, v are bf16.
+        lr1 is fp32.
+        The forward, backward produce bf16 gradients, updated fast weights are fp32.
+        The final output are bf16.
     """
     del lr0, lr2 # make sure lr0 and lr2 are not used.
     assert not weight_norm, "parallel form does not support weight norm."
@@ -57,12 +64,14 @@ def block_causal_lact_swiglu(
     gated_k = F.silu(gate_k) * hidden_k # [b*n, dh, c]
 
     # 4. Compute dw1 using BMM (Replaces einsum)
-    # Pre-multiply v by lr1 to simplify outer product
-    lr1_pad = F.pad(lr1, (0, 0, 0, pad)) if pad > 0 else lr1
-    v_scaled = v_flat * lr1_pad.view(b * n_blocks, chunk_size, 1)
-    
+    # Cast to input dtype before bmm for gradient computation (like original.py line 102)
     # [b*n, dv, c] @ [b*n, c, dh] -> [b*n, dv, dh]
-    dw1 = torch.bmm(v_scaled.transpose(1, 2), gated_k.transpose(1, 2))
+    lr1_pad = F.pad(lr1, (0, 0, 0, pad)) if pad > 0 else lr1
+    # Cast (gated_k * lr1) to v's dtype before bmm, similar to original.py
+    dw1 = torch.bmm(
+        v_flat.transpose(1, 2),
+        (gated_k.transpose(1, 2) * lr1_pad.view(b * n_blocks, chunk_size, -1)).type_as(v_flat)
+    )
     dw1 = dw1.view(b, n_blocks, dv, dh)
 
     # 5. Momentum Recurrence
@@ -87,7 +96,8 @@ def block_causal_lact_swiglu(
     gated_q = F.silu(gate_q) * hidden_q
     
     # [b*n, dv, dh] @ [b*n, dh, c] -> [b*n, dv, c]
-    out = torch.bmm(w1_before.view(b * n_blocks, dv, dh), gated_q)
+    # Cast w1_before to input dtype before bmm to keep output in bf16
+    out = torch.bmm(w1_before.view(b * n_blocks, dv, dh).type_as(gated_q), gated_q)
     
     out = out.transpose(1, 2).reshape(b, l_pad, dv)
     return out[:, :l, :]
