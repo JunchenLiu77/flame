@@ -15,13 +15,7 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # For SLURM: use the first node as master
-if [[ -z "${MASTER_ADDR}" ]]; then
-  if [[ -n "${SLURM_NODELIST}" ]]; then
-    export MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
-  else
-    export MASTER_ADDR="localhost"
-  fi
-fi
+MASTER_ADDR="localhost"
 if [[ -z "${MASTER_PORT}" ]]; then
   export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
 fi
@@ -33,7 +27,7 @@ MAX_SEQ_LENGTH=32768
 POSITION_INTERVAL=1024
 NUM_SAMPLES=""
 TARGET_TOKENS="2.5e9"
-DATASET_PATH="/datasets/DL3DV-DSO/book3"
+DATASET_PATH="/root/.cache/huggingface/hub/datasets--Geralt-Targaryen--books3/snapshots/669aefeaf7e17e3f2039004d603c7a4cc4163af9"
 OUTPUT_DIR=""
 NUM_GPUS=1
 BATCH_SIZE=1
