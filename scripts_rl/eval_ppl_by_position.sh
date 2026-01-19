@@ -36,6 +36,7 @@ TARGET_TOKENS="2.5e9"
 DATASET_PATH="/datasets/DL3DV-DSO/book3"
 OUTPUT_DIR=""
 NUM_GPUS=1
+BATCH_SIZE=1
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
             NUM_GPUS="$2"
             shift 2
             ;;
+        --batch_size)
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -100,6 +105,7 @@ if [[ -z "$MODEL_PATH" ]]; then
     echo "  --dataset_path       Path to Book3 dataset"
     echo "  --output_dir         Output directory"
     echo "  --num_gpus           Number of GPUs to use (default: 1)"
+    echo "  --batch_size         Batch size for evaluation (default: 1)"
     exit 1
 fi
 
@@ -112,6 +118,7 @@ echo "  Max Seq Length: $MAX_SEQ_LENGTH"
 echo "  Position Interval: $POSITION_INTERVAL"
 echo "  Target Tokens: $TARGET_TOKENS"
 echo "  Num Samples: ${NUM_SAMPLES:-'(auto from target_tokens)'}"
+echo "  Batch Size: $BATCH_SIZE"
 echo "  Num GPUs: $NUM_GPUS"
 if [[ "$NUM_GPUS" -gt 1 ]]; then
     echo "  Master Addr: $MASTER_ADDR"
@@ -126,6 +133,7 @@ PYTHON_ARGS="eval_ppl_by_position.py \
     --max_seq_length $MAX_SEQ_LENGTH \
     --position_interval $POSITION_INTERVAL \
     --target_tokens $TARGET_TOKENS \
+    --batch_size $BATCH_SIZE \
     --dataset_path \"$DATASET_PATH\""
 
 if [[ -n "$NUM_SAMPLES" ]]; then

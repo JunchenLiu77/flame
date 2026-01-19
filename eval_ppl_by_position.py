@@ -88,6 +88,12 @@ def parse_args():
         default=BOOK3_PATH,
         help=f"Path to Book3 dataset (default: {BOOK3_PATH})",
     )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Batch size for evaluation (default: 1)",
+    )
     return parser.parse_args()
 
 
@@ -197,6 +203,19 @@ def get_sequences_for_rank(
 # Evaluation
 # ============================================================================
 
+def batch_sequences(sequence_generator, batch_size: int):
+    """Batch sequences from a generator."""
+    batch = []
+    for seq in sequence_generator:
+        batch.append(seq)
+        if len(batch) == batch_size:
+            yield torch.stack(batch, dim=0)
+            batch = []
+    # Yield remaining sequences
+    if batch:
+        yield torch.stack(batch, dim=0)
+
+
 @torch.no_grad()
 def evaluate_per_position(
     model,
@@ -207,6 +226,7 @@ def evaluate_per_position(
     device: str,
     rank: int = 0,
     world_size: int = 1,
+    batch_size: int = 1,
 ):
     """
     Evaluate per-position perplexity.
@@ -227,46 +247,57 @@ def evaluate_per_position(
     
     # Calculate how many sequences this rank will process
     my_num_samples = len([i for i in range(num_samples) if i % world_size == rank])
+    num_batches = (my_num_samples + batch_size - 1) // batch_size
     
     if world_size > 1:
-        print(f"[Rank {rank}] Processing {my_num_samples} sequences (tokenizing on-the-fly)")
+        print(f"[Rank {rank}] Processing {my_num_samples} sequences in {num_batches} batches (batch_size={batch_size})")
     else:
         print(f"\nStarting evaluation...")
-        print(f"Processing {num_samples} sequences of length {max_seq_length}")
+        print(f"Processing {num_samples} sequences of length {max_seq_length} (batch_size={batch_size})")
     
-    # Process sequences assigned to this rank
+    # Process sequences assigned to this rank in batches
+    sequence_gen = get_sequences_for_rank(texts, tokenizer, max_seq_length, num_samples, rank, world_size)
+    batched_gen = batch_sequences(sequence_gen, batch_size)
+    
     pbar = tqdm(
-        get_sequences_for_rank(texts, tokenizer, max_seq_length, num_samples, rank, world_size),
-        total=my_num_samples,
+        batched_gen,
+        total=num_batches,
         desc=f"GPU {rank}" if world_size > 1 else "Evaluating",
         position=rank if world_size > 1 else 0,
     )
     
     for input_ids in pbar:
-        input_ids = input_ids.unsqueeze(0).to(device)  # [1, seq_len]
+        # input_ids: [batch_size, seq_len]
+        input_ids = input_ids.to(device)
+        current_batch_size = input_ids.size(0)
         
         # Forward pass
         outputs = model(input_ids)
-        logits = outputs.logits  # [1, seq_len, vocab_size]
+        logits = outputs.logits  # [batch_size, seq_len, vocab_size]
         
         # Compute per-token loss
         # Shift: predict token[i+1] from logits[i]
-        shift_logits = logits[:, :-1, :].contiguous()  # [1, seq_len-1, vocab]
-        shift_labels = input_ids[:, 1:].contiguous()    # [1, seq_len-1]
+        shift_logits = logits[:, :-1, :].contiguous()  # [batch_size, seq_len-1, vocab]
+        shift_labels = input_ids[:, 1:].contiguous()    # [batch_size, seq_len-1]
         
-        # Per-token loss: [seq_len-1]
+        # Per-token loss: [batch_size * (seq_len-1)]
         per_token_loss = criterion(
             shift_logits.view(-1, shift_logits.size(-1)),
             shift_labels.view(-1)
         )
         
-        # Accumulate loss at each position
-        # Note: per_token_loss[i] is the loss of predicting token[i+1] from context [0:i+1]
-        # So position i+1 has loss per_token_loss[i]
-        for i, loss in enumerate(per_token_loss.cpu().tolist()):
+        # Reshape to [batch_size, seq_len-1]
+        per_token_loss = per_token_loss.view(current_batch_size, -1)
+        
+        # Sum loss across batch for each position (more efficient than iterating)
+        # per_token_loss[b, i] is the loss of predicting token[i+1] from context [0:i+1]
+        # So position i+1 has loss per_token_loss[:, i]
+        loss_sum_per_position = per_token_loss.sum(dim=0).cpu()  # [seq_len-1]
+        
+        for i, loss_sum in enumerate(loss_sum_per_position.tolist()):
             position = i + 1  # Position of the predicted token
-            position_losses[position][0] += loss
-            position_losses[position][1] += 1
+            position_losses[position][0] += loss_sum
+            position_losses[position][1] += current_batch_size
     
     return position_losses
 
@@ -387,6 +418,7 @@ def main():
     print_rank0(f"  Position interval: {args.position_interval}", rank)
     print_rank0(f"  Target tokens: {args.target_tokens:,.0f}", rank)
     print_rank0(f"  Number of samples: {num_samples:,} (= {num_samples * args.max_seq_length:,.0f} tokens)", rank)
+    print_rank0(f"  Batch size: {args.batch_size}", rank)
     if world_size > 1:
         print_rank0(f"  World size: {world_size} GPUs", rank)
     
@@ -436,6 +468,7 @@ def main():
         device=device,
         rank=rank,
         world_size=world_size,
+        batch_size=args.batch_size,
     )
     
     # Synchronize and reduce results
