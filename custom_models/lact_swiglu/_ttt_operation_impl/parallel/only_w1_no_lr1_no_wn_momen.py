@@ -108,67 +108,55 @@ def block_prefix_causal_linear_attention_parallel(
     b, l, dk = q.shape
     dv = v.shape[-1]
     dh = w0.shape[1]
-    assert w0.shape == (b, dh, dk)
-    assert w1.shape == (b, dv, dh)
-    assert w2.shape == (b, dh, dk)
-    assert k.shape == (b, l, dk)
-    assert v.shape == (b, l, dv)
-
-    # Pad sequence to multiple of chunk_size (padding tokens contribute zero to updates)
     n_blocks = (l + chunk_size - 1) // chunk_size
     l_pad = n_blocks * chunk_size
     pad = l_pad - l
-    if pad:
-        q_pad = F.pad(q, (0, 0, 0, pad))  # pad length dim
-        k_pad = F.pad(k, (0, 0, 0, pad))
-        v_pad = F.pad(v, (0, 0, 0, pad))
-    else:
-        q_pad, k_pad, v_pad = q, k, v
 
-    # [b, n, c, dk/dv]
-    q_blk = q_pad.view(b, n_blocks, chunk_size, dk)
-    k_blk = k_pad.view(b, n_blocks, chunk_size, dk)
-    v_blk = v_pad.view(b, n_blocks, chunk_size, dv)
+    # 1. Concatenate weights for single projection launch
+    # [b, 2*dh, dk]
+    w02 = torch.cat([w0, w2], dim=1)
+    
+    # 2. Prepare inputs (Flatten B and N)
+    q_pad = F.pad(q, (0, 0, 0, pad)) if pad > 0 else q
+    k_pad = F.pad(k, (0, 0, 0, pad)) if pad > 0 else k
+    v_pad = F.pad(v, (0, 0, 0, pad)) if pad > 0 else v
+    
+    q_flat = q_pad.view(b * n_blocks, chunk_size, dk)
+    k_flat = k_pad.view(b * n_blocks, chunk_size, dk)
+    v_flat = v_pad.view(b * n_blocks, chunk_size, dv)
 
-    # Compute hidden states for keys: hidden = silu(w0 @ k) * (w2 @ k)
-    # k_blk: [b, n, c, dk] -> transpose to [b*n, dk, c] for bmm
-    k_flat = k_blk.reshape(b * n_blocks, chunk_size, dk).transpose(1, 2)  # [b*n, dk, c]
-    w0_exp = w0.unsqueeze(1).expand(-1, n_blocks, -1, -1).reshape(b * n_blocks, dh, dk)  # [b*n, dh, dk]
-    w2_exp = w2.unsqueeze(1).expand(-1, n_blocks, -1, -1).reshape(b * n_blocks, dh, dk)  # [b*n, dh, dk]
+    # 3. Single BMM for Gate & Hidden (instead of two)
+    # [b*n, dk, c] -> [b*n, 2*dh, c]
+    w02_exp = w02.repeat_interleave(n_blocks, dim=0)
+    z_all = torch.bmm(w02_exp, k_flat.transpose(1, 2))
+    
+    # Slice gate and hidden
+    gate_k, hidden_k = z_all.chunk(2, dim=1)
+    # Fused SiLU and Mul
+    gated_k = F.silu(gate_k) * hidden_k # [b*n, dh, c]
 
-    gate_before_act = torch.bmm(w0_exp, k_flat)  # [b*n, dh, c]
-    hidden_before_mul = torch.bmm(w2_exp, k_flat)  # [b*n, dh, c]
-    hidden = F.silu(gate_before_act, inplace=False) * hidden_before_mul  # [b*n, dh, c]
-    hidden = hidden.reshape(b, n_blocks, dh, chunk_size)  # [b, n, dh, c]
+    # 4. Compute dw1 using BMM (Replaces einsum)
+    # [b*n, dv, c] @ [b*n, c, dh] -> [b*n, dv, dh]
+    dw1 = torch.bmm(v_flat.transpose(1, 2), gated_k.transpose(1, 2))
+    dw1 = dw1.view(b, n_blocks, dv, dh)
 
-    # Per-block update: dw1[j] = sum_t v_t @ hidden_t.T  -> [b, n, dv, dh]
-    # v_blk: [b, n, c, dv], hidden: [b, n, dh, c]
-    # einsum: (b n t dv) x (b n dh t) -> (b n dv dh)
-    dw1 = torch.einsum("bntd,bnht->bndh", v_blk, hidden)
     if use_muon:
+        # Use single flattened call for Muon
         dw1 = zeropower_via_newtonschulz5(dw1.reshape(-1, dv, dh)).reshape_as(dw1)
 
-    # Prefix state BEFORE each block:
-    # w1_before[0] = w1
-    # w1_before[i] = w1 + sum_{j < i} dw1[j]
-    # Compute exclusive prefix-sum by shifting the inclusive cumsum.
-    prefix_inclusive = dw1.cumsum(dim=1)  # [b, n, dv, dh]
-    prefix_exclusive = prefix_inclusive - dw1
-    w1_before = prefix_exclusive + w1.unsqueeze(1)  # [b, n, dv, dh]
+    # 5. Prefix-sum for w1
+    prefix_exclusive = torch.cumsum(dw1, dim=1) - dw1
+    w1_before = prefix_exclusive + w1.unsqueeze(1)
 
-    # Compute hidden states for queries: gate * h = silu(w0 @ q) * (w2 @ q)
-    q_flat = q_blk.reshape(b * n_blocks, chunk_size, dk).transpose(1, 2)  # [b*n, dk, c]
-    gate_q = torch.bmm(w0_exp, q_flat)  # [b*n, dh, c]
-    h_q = torch.bmm(w2_exp, q_flat)  # [b*n, dh, c]
-    gated_h = F.silu(gate_q, inplace=False) * h_q  # [b*n, dh, c]
-    gated_h = gated_h.reshape(b, n_blocks, dh, chunk_size)  # [b, n, dh, c]
-
-    # Output per block: o = w1_before @ (gate * h)
-    # w1_before: [b, n, dv, dh], gated_h: [b, n, dh, c]
-    # einsum: (b n dv dh) x (b n dh t) -> (b n t dv)
-    out_blk = torch.einsum("bndh,bnht->bntd", w1_before, gated_h)
-
-    out = out_blk.reshape(b, l_pad, dv)
+    # 6. Final Output Projection
+    z_q = torch.bmm(w02_exp, q_flat.transpose(1, 2))
+    gate_q, hidden_q = z_q.chunk(2, dim=1)
+    gated_q = F.silu(gate_q) * hidden_q
+    
+    # [b*n, dv, dh] @ [b*n, dh, c] -> [b*n, dv, c]
+    out = torch.bmm(w1_before.view(b * n_blocks, dv, dh), gated_q)
+    
+    out = out.transpose(1, 2).reshape(b, l_pad, dv)
     return out[:, :l, :]
 
 

@@ -17,6 +17,7 @@ def block_prefix_causal_linear_attention_recurrent(
     v: torch.Tensor, # [b, l, dv]
     chunk_size: int = 2048,
     use_muon: bool = True,
+    momentum: torch.Tensor = None,  # [b, l, 1]
 ) -> torch.Tensor: # [b, l, dv]
     """
     block i attends to all previous blocks (< i) + initial state
@@ -24,7 +25,15 @@ def block_prefix_causal_linear_attention_recurrent(
     block 0 attends to only initial state.
 
     no within-block attention
+    
+    Straight qk version with momentum:
+    - Output: state @ q
+    - State update: dstate = v @ k.T
     """
+
+    if momentum is not None:
+        dstate_momentum = torch.zeros_like(state)
+
     q = q.transpose(1, 2)  # [b, dk, l]
     v = v.transpose(1, 2)  # [b, dv, l]
 
@@ -49,6 +58,14 @@ def block_prefix_causal_linear_attention_recurrent(
 
         # [b, dv, l] @ [b, l, dk] -> [b, dv, dk]
         dstate = torch.bmm(vi, ki)
+
+        if momentum is not None:
+            m_i = momentum[:, s_index:e_index, :]
+            m_i = m_i.mean(dim=1, keepdim=True)
+
+            dstate = dstate + dstate_momentum * m_i
+            dstate_momentum = dstate
+            
         if use_muon:
             dstate = zeropower_via_newtonschulz5(dstate)
 
@@ -73,6 +90,7 @@ def block_prefix_causal_linear_attention_parallel(
     v: torch.Tensor,   # [b, l, dv]
     chunk_size: int = 2048,
     use_muon: bool = True,
+    momentum: torch.Tensor = None,  # [b, l, 1]
 ) -> torch.Tensor:     # [b, l, dv]
     """
     block i attends to all previous blocks (< i) + initial state
@@ -80,6 +98,14 @@ def block_prefix_causal_linear_attention_parallel(
     no within-block attention
 
     Parallel form via per-block outer-product reduction + prefix-sum over blocks.
+
+    Straight qk version with momentum:
+    - Output: state @ q
+    - State update: dS = v @ k.T
+    
+    With momentum, the recurrence is:
+    - dS'[i] = dS[i] + dS'[i-1] * m[i]
+    This is computed via a parallel scan.
     """
     b, l, dk = q.shape
     dv = v.shape[-1]
@@ -96,23 +122,31 @@ def block_prefix_causal_linear_attention_parallel(
     k_flat = k_pad.view(b * n_blocks, chunk_size, dk)
     v_flat = v_pad.view(b * n_blocks, chunk_size, dv)
 
-    # 2. Compute dS using BMM (Replaces einsum)
-    # Per-block update: dS[j] = sum_t v_t k_t^T  -> [b*n, dv, dk]
+    # 2. Compute dS using BMM
+    # Per-block update: dS[j] = sum_t v_t @ k_t^T  -> [b*n, dv, dk]
     # [b*n, dv, c] @ [b*n, c, dk] -> [b*n, dv, dk]
     dS = torch.bmm(v_flat.transpose(1, 2), k_flat)
     dS = dS.view(b, n_blocks, dv, dk)
 
+    # 3. Momentum Recurrence
+    if momentum is not None:
+        m_pad = F.pad(momentum, (0, 0, 0, pad)) if pad > 0 else momentum
+        m_blk = m_pad.view(b, n_blocks, chunk_size).mean(dim=2, keepdim=True)
+        # Parallel scan via cumprod/cumsum
+        m_prod = m_blk.cumprod(dim=1).unsqueeze(-1)
+        dS = m_prod * torch.cumsum(dS / (m_prod + 1e-8), dim=1)
+
     if use_muon:
         dS = zeropower_via_newtonschulz5(dS.reshape(-1, dv, dk)).reshape_as(dS)
 
-    # 3. Prefix-sum for state
+    # 4. Prefix-sum for state
     # S_before[0] = s0
     # S_before[i] = s0 + sum_{j < i} dS[j]
     prefix_exclusive = torch.cumsum(dS, dim=1) - dS
     S_before = prefix_exclusive + s0.unsqueeze(1)  # [b, n, dv, dk]
 
-    # 4. Final Output using BMM (Replaces einsum)
-    # Output per block: o = S_before @ q (with q as vector on dk)
+    # 5. Final Output using BMM
+    # Output per block: o = S_before @ q
     # [b*n, dv, dk] @ [b*n, dk, c] -> [b*n, dv, c]
     out = torch.bmm(S_before.view(b * n_blocks, dv, dk), q_flat.transpose(1, 2))
     
@@ -151,15 +185,12 @@ def test_equiv(
         q  = torch.rand(b, l, dk, device=device, dtype=dtype)
         k  = torch.rand(b, l, dk, device=device, dtype=dtype)
         v  = torch.rand(b, l, dv, device=device, dtype=dtype)
+        momentum = torch.rand(b, l, 1, device=device, dtype=dtype)
 
-        for _ in tqdm.trange(3000, disable=not benchmark): # 1381 it/s; use moun: 193 it/s
-            y_ref = block_prefix_causal_linear_attention_recurrent(s0, q, k, v, chunk, use_muon)
-        for _ in tqdm.trange(30000, disable=not benchmark): # 11305 it/s; use muon: 2568 it/s
-            y_par = block_prefix_causal_linear_attention_parallel(s0, q, k, v, chunk, use_muon)
-        # for _ in tqdm.trange(300, disable=not benchmark): # not efficient, only works for fp32
-        #     y_tri = block_prefix_causal_linear_attention_triton_recurrent(s0, q, k, v, chunk)
-        # for _ in tqdm.trange(300, disable=not benchmark): # not efficient, only works for fp32
-        #     y_tri = block_prefix_causal_linear_attention_triton_parallel(s0, q, k, v, chunk)
+        for _ in tqdm.trange(3000, disable=not benchmark):
+            y_ref = block_prefix_causal_linear_attention_recurrent(s0, q, k, v, chunk, use_muon, momentum)
+        for _ in tqdm.trange(30000, disable=not benchmark):
+            y_par = block_prefix_causal_linear_attention_parallel(s0, q, k, v, chunk, use_muon, momentum)
 
         if not benchmark:
             # tolerance: fp16 on GPU needs looser
