@@ -34,8 +34,8 @@ print(f"Dtype: {dtype}")
 print()
 
 # Benchmark config
-b, l, dk, dh, dv, chunk = 1, 32768, 64, 64, 64, 2048
-n_warmup = 100
+b, l, dk, dh, dv, chunk = 4, 32768, 384, 384, 384, 2048
+n_warmup = 10
 n_iters = 1000
 
 torch.manual_seed(44)
@@ -378,35 +378,35 @@ if __name__ == "__main__":
     rec = benchmark_only_w1(True)
     print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
     
-    # print("\nVariant2: only_w1_no_wn.py (has lr1, momentum, w0/w2 gating, no weight norm)")
-    # rec, par = benchmark_only_w1_no_wn(True)
-    # print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
-    # print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
-    # print(f"   Speedup:   {par/rec:.2f}x")
+    print("\nVariant2: only_w1_no_wn.py (has lr1, momentum, w0/w2 gating, no weight norm)")
+    rec, par = benchmark_only_w1_no_wn(True)
+    print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
+    print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
+    print(f"   Speedup:   {par/rec:.2f}x")
     
-    # print("\nVariant3: only_w1_straight_qk_no_wn.py (straight qk, has lr1, momentum)")
-    # rec, par = benchmark_only_w1_straight_qk_no_wn(True)
-    # print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
-    # print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
-    # print(f"   Speedup:   {par/rec:.2f}x")
+    print("\nVariant3: only_w1_straight_qk_no_wn.py (straight qk, has lr1, momentum)")
+    rec, par = benchmark_only_w1_straight_qk_no_wn(True)
+    print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
+    print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
+    print(f"   Speedup:   {par/rec:.2f}x")
     
-    # print("\nVariant4: only_w1_straight_qk_no_lr1_no_wn.py (straight qk, has momentum, no lr1)")
-    # rec, par = benchmark_only_w1_straight_qk_no_lr1_no_wn(True)
-    # print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
-    # print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
-    # print(f"   Speedup:   {par/rec:.2f}x")
+    print("\nVariant4: only_w1_straight_qk_no_lr1_no_wn.py (straight qk, has momentum, no lr1)")
+    rec, par = benchmark_only_w1_straight_qk_no_lr1_no_wn(True)
+    print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
+    print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
+    print(f"   Speedup:   {par/rec:.2f}x")
     
-    # print("\nVariant5: only_w1_straight_qk_no_lr1_no_wn_momen.py (simple state, no momentum)")
-    # rec, par = benchmark_only_w1_straight_qk_no_lr1_no_wn_momen(True)
-    # print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
-    # print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
-    # print(f"   Speedup:   {par/rec:.2f}x")
+    print("\nVariant5: only_w1_straight_qk_no_lr1_no_wn_momen.py (simple state, no momentum)")
+    rec, par = benchmark_only_w1_straight_qk_no_lr1_no_wn_momen(True)
+    print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
+    print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
+    print(f"   Speedup:   {par/rec:.2f}x")
     
-    # print("\nVariant6. only_w1_straight_qk_no_lr1_no_wn_muon_momen.py (simple state, no muon, no momentum)")
-    # rec, par = benchmark_only_w1_straight_qk_no_lr1_no_wn_momen(False)
-    # print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
-    # print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
-    # print(f"   Speedup:   {par/rec:.2f}x")
+    print("\nVariant6. only_w1_straight_qk_no_lr1_no_wn_muon_momen.py (simple state, no muon, no momentum)")
+    rec, par = benchmark_only_w1_straight_qk_no_lr1_no_wn_momen(False)
+    print(f"   Recurrent: {rec/1e6:.2f}M tokens/sec")
+    print(f"   Parallel:  {par/1e6:.2f}M tokens/sec")
+    print(f"   Speedup:   {par/rec:.2f}x")
 
     print("\n" + "="*80)
     print("Benchmark complete!")
