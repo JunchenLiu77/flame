@@ -4,7 +4,7 @@ import torch
 from custom_models.lact_swiglu.ttt_operation import silu_backprop, zeropower_via_newtonschulz5
 
 
-@torch.compile()
+# @torch.compile()
 def block_causal_lact_swiglu(
     w0: torch.Tensor,
     w1: torch.Tensor,
