@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CHECKPOINT_STEPS=(20000)
-SEQ_LENGTHS=(1024 2048 4096 8192)
+SEQ_LENGTHS=(1024)
 
 for CHECKPOINT_STEP in "${CHECKPOINT_STEPS[@]}"; do
   for SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
@@ -53,5 +53,19 @@ for CHECKPOINT_STEP in "${CHECKPOINT_STEPS[@]}"; do
     # ARGS="--checkpoint exp/lact_baseline_bs32_20k_only_w1_straight_qk_no_lr1_no_wn/checkpoint/step-$CHECKPOINT_STEP --config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_only_w1_straight_qk_no_lr1_no_wn.json --seq_length $SEQ_LENGTH $COMMON_ARGS"
     # bash srun_sub.sh $NUM_GPUS eval_ruler nvr_torontoai_videogen $ARGS
 
+    ARGS="--checkpoint exp/lact_baseline_bs32_20k_only_w1_no_wn_parallel/checkpoint/step-$CHECKPOINT_STEP --config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_only_w1_no_wn_parallel.json --seq_length $SEQ_LENGTH $COMMON_ARGS"
+    bash srun_sub.sh $NUM_GPUS eval_ruler nvr_torontoai_videogen $ARGS
+
+    ARGS="--checkpoint exp/lact_baseline_bs32_20k_only_w1_no_wn_speedy/checkpoint/step-$CHECKPOINT_STEP --config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_only_w1_no_wn.json --seq_length $SEQ_LENGTH $COMMON_ARGS"
+    bash srun_sub.sh $NUM_GPUS eval_ruler nvr_torontoai_videogen $ARGS
+
+    ARGS="--checkpoint exp/lact_baseline_bs32_20k_only_w1_speedy/checkpoint/step-$CHECKPOINT_STEP --config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_only_w1.json --seq_length $SEQ_LENGTH $COMMON_ARGS"
+    bash srun_sub.sh $NUM_GPUS eval_ruler nvr_torontoai_videogen $ARGS
+
+    ARGS="--checkpoint exp/lact_baseline_bs32_20k_only_w1_straight_qk_no_wn/checkpoint/step-$CHECKPOINT_STEP --config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_only_w1_straight_qk_no_wn.json --seq_length $SEQ_LENGTH $COMMON_ARGS"
+    bash srun_sub.sh $NUM_GPUS eval_ruler nvr_torontoai_videogen $ARGS
+
+    ARGS="--checkpoint exp/lact_baseline_bs32_20k_only_w1_straight_qk_no_lr1_no_wn_momen/checkpoint/step-$CHECKPOINT_STEP --config configs/760M_lact_swiglu_nh4_fwlow_rank_momentum_muon_only_w1_straight_qk_no_lr1_no_wn_momen.json --seq_length $SEQ_LENGTH $COMMON_ARGS"
+    bash srun_sub.sh $NUM_GPUS eval_ruler nvr_torontoai_videogen $ARGS
   done
 done
